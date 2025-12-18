@@ -4,12 +4,12 @@ import mido
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QComboBox, QPushButton, QVBoxLayout, 
     QHBoxLayout, QWidget, QLabel, QScrollArea, QGridLayout, QMenu, 
-    QListWidget, QInputDialog, QLineEdit, QMessageBox, QSlider, QFrame
+    QListWidget, QInputDialog, QLineEdit, QMessageBox, QSlider, QFrame, QTabWidget
 )
 from PyQt6.QtGui import QColor, QIntValidator, QFont
 from PyQt6.QtCore import QTimer, Qt
 
-# IMPORT MODULI (Nessuna modifica agli altri file)
+# IMPORT MODULI
 from dmx_engine import DMXController
 from playback_engine import PlaybackEngine
 from midi_manager import MidiManager
@@ -57,8 +57,7 @@ class MainWindow(QMainWindow):
         self.timer_engine.start(40) 
 
     def init_interface(self):
-        self.setWindowTitle("MIDI-DMX Pro v.9.0 - Blackout Fix")
-        self.resize(1650, 950)
+        self.setWindowTitle("MIDI-DMX Pro v.11.0 - ArtNet Enabled")
         
         self.setStyleSheet("""
             QMainWindow { background-color: #0f0f0f; }
@@ -67,9 +66,7 @@ class MainWindow(QMainWindow):
                 background-color: #141414; border: 1px solid #2a2a2a; color: #ddd; outline: none;
             }
             QListWidget::item:selected { 
-                background-color: #2ecc71; 
-                color: black;
-                border: none;
+                background-color: #2ecc71; color: black; border: none;
             }
             QLineEdit {
                 background-color: #1a1a1a; color: #ddd; border: 1px solid #333; padding: 4px;
@@ -80,25 +77,56 @@ class MainWindow(QMainWindow):
             QSlider::handle:horizontal {
                 background: #3498db; border: 1px solid #3498db; width: 14px; height: 14px; margin: -4px 0; border-radius: 7px;
             }
+            QTabWidget::pane { border: 1px solid #333; }
+            QTabBar::tab { background: #222; color: #888; padding: 5px; }
+            QTabBar::tab:selected { background: #333; color: white; border-bottom: 2px solid #3498db; }
         """)
         
         central = QWidget()
         main_layout = QHBoxLayout(central)
+        main_layout.setContentsMargins(10, 10, 10, 10)
         self.setCentralWidget(central)
         
         # --- LEFT PANEL ---
         left = QVBoxLayout()
-        panel_l = QWidget(); panel_l.setFixedWidth(230); panel_l.setLayout(left)
+        panel_l = QWidget(); panel_l.setFixedWidth(240); panel_l.setLayout(left)
         
-        # Hardware
-        left.addWidget(QLabel("<b>1. HARDWARE</b>"))
-        self.midi_combo = QComboBox(); self.midi_combo.addItems(mido.get_input_names())
+        # --- SEZIONE HARDWARE (TAB) ---
+        left.addWidget(QLabel("<b>1. OUTPUT SETUP</b>"))
+        self.hw_tabs = QTabWidget()
+        self.hw_tabs.setFixedHeight(130)
+        
+        # Tab Serial
+        tab_ser = QWidget()
+        l_ser = QVBoxLayout(tab_ser)
         self.dmx_combo = QComboBox(); self.dmx_combo.addItems([p.device for p in serial.tools.list_ports.comports()])
-        btn_conn = QPushButton("CONNETTI SISTEMA"); btn_conn.setFixedHeight(35)
-        btn_conn.clicked.connect(self.connect_hardware)
-        left.addWidget(QLabel("MIDI Input:")); left.addWidget(self.midi_combo)
-        left.addWidget(QLabel("DMX Port:")); left.addWidget(self.dmx_combo)
-        left.addWidget(btn_conn); left.addSpacing(15)
+        btn_conn_ser = QPushButton("CONNETTI SERIALE"); btn_conn_ser.clicked.connect(self.connect_serial)
+        l_ser.addWidget(QLabel("Porta DMX (USB):")); l_ser.addWidget(self.dmx_combo); l_ser.addWidget(btn_conn_ser)
+        self.hw_tabs.addTab(tab_ser, "USB DMX")
+        
+        # Tab ArtNet
+        tab_art = QWidget()
+        l_art = QVBoxLayout(tab_art)
+        
+        row_ip = QHBoxLayout()
+        self.art_ip = QLineEdit("127.0.0.1")
+        self.art_uni = QLineEdit("0"); self.art_uni.setFixedWidth(30); self.art_uni.setValidator(QIntValidator(0, 15))
+        row_ip.addWidget(QLabel("IP:")); row_ip.addWidget(self.art_ip)
+        row_ip.addWidget(QLabel("Uni:")); row_ip.addWidget(self.art_uni)
+        
+        btn_conn_art = QPushButton("ATTIVA ART-NET"); btn_conn_art.clicked.connect(self.connect_artnet)
+        
+        l_art.addLayout(row_ip); l_art.addWidget(btn_conn_art)
+        self.hw_tabs.addTab(tab_art, "ART-NET")
+        
+        left.addWidget(self.hw_tabs)
+        
+        # MIDI Setup (Sempre visibile)
+        midi_box = QHBoxLayout()
+        self.midi_combo = QComboBox(); self.midi_combo.addItems(mido.get_input_names())
+        btn_midi = QPushButton("OK"); btn_midi.setFixedWidth(40); btn_midi.clicked.connect(self.connect_midi)
+        midi_box.addWidget(QLabel("MIDI IN:")); midi_box.addWidget(self.midi_combo); midi_box.addWidget(btn_midi)
+        left.addLayout(midi_box); left.addSpacing(15)
         
         # Live
         left.addWidget(QLabel("<b>2. LIVE CONTROL</b>"))
@@ -201,24 +229,35 @@ class MainWindow(QMainWindow):
 
         main_layout.addWidget(panel_l); main_layout.addWidget(scroll); main_layout.addWidget(panel_r)
 
+    # --- HARDWARE CONNECTION ---
+    def connect_serial(self):
+        port = self.dmx_combo.currentText()
+        if not port: return
+        if self.dmx.connect_serial(port):
+            QMessageBox.information(self, "OK", f"Connesso via USB a {port}")
+            self.setWindowTitle("MIDI-DMX Pro [MODE: USB SERIAL]")
+
+    def connect_artnet(self):
+        ip = self.art_ip.text()
+        uni = self.art_uni.text()
+        if self.dmx.connect_artnet(ip, uni):
+            QMessageBox.information(self, "OK", f"Art-Net Attivo\nTarget: {ip} | Uni: {uni}")
+            self.setWindowTitle("MIDI-DMX Pro [MODE: ART-NET]")
+
+    def connect_midi(self):
+        if self.midi.open_port(self.midi_combo.currentText()):
+            pass # Feedback opzionale
+
     # --- ACTIONS & BLACKOUT ---
     def action_blackout(self):
-        """Spegne tutto, ferma il timer e pulisce la selezione UI."""
-        # 1. Ferma l'automazione
         self.show_step_timer.stop()
         self.btn_go.setText("GO / NEXT ▶")
-        
-        # 2. Resetta Engine e Buffer
         self.playback.stop_all()
-        
-        # 3. Resetta Fader Live
         self.f_slider.blockSignals(True)
         self.f_slider.setValue(0)
         self.f_slider.blockSignals(False)
         self.f_input.setText("0")
         self.f_label.setText("LIVE: 0 | 0%")
-        
-        # 4. FIX: Pulisce la selezione nella lista SHOW per feedback visivo
         self.show_list_widget.clearSelection()
         self.show_list_widget.setCurrentRow(-1)
 
@@ -234,11 +273,7 @@ class MainWindow(QMainWindow):
             self.save_data()
             QMessageBox.information(self, "Cue Aggiunta", f"Cue aggiunta con durata fissa: {duration/1000}s")
         else:
-            duration, ok = QInputDialog.getInt(
-                self, "Durata Step", 
-                f"Inserisci durata in ms per '{name}':\n(0 = Manuale/Infinito)", 
-                value=0, min=0, max=3600000
-            )
+            duration, ok = QInputDialog.getInt(self, "Durata Step", f"Inserisci durata in ms per '{name}':\n(0 = Manuale)", value=0, min=0, max=3600000)
             if ok:
                 obj = {"type": type_key, "name": name, "duration": duration}
                 self.data_store["show"].append(obj)
@@ -247,7 +282,6 @@ class MainWindow(QMainWindow):
 
     def play_show_item(self, item):
         self.show_step_timer.stop()
-        
         row_idx = self.show_list_widget.row(item)
         entry = self.data_store["show"][row_idx]
         
@@ -279,58 +313,38 @@ class MainWindow(QMainWindow):
     def show_manager_context_menu(self, pos):
         item = self.show_list_widget.itemAt(pos)
         if not item: return
-        
         row = self.show_list_widget.row(item)
         entry = self.data_store["show"][row]
         
         if isinstance(entry, str):
-            t, n = entry.split(":", 1)
-            entry = {"type": t, "name": n, "duration": 0}
+            t, n = entry.split(":", 1); entry = {"type": t, "name": n, "duration": 0}
             self.data_store["show"][row] = entry
 
         menu = QMenu()
         act_time = menu.addAction("Modifica Durata Step")
         act_del = menu.addAction("Rimuovi da Show")
-        
         res = menu.exec(self.show_list_widget.mapToGlobal(pos))
         
         if res == act_del:
-            self.data_store["show"].pop(row)
-            self.refresh_show_list_widget()
-            self.save_data()
-            
+            self.data_store["show"].pop(row); self.refresh_show_list_widget(); self.save_data()
         elif res == act_time:
-            if entry["type"] == "cue":
-                QMessageBox.warning(self, "Impossibile Modificare", "La durata di una Cue è fissa.")
+            if entry["type"] == "cue": QMessageBox.warning(self, "Block", "Durata Cue fissa.")
             else:
                 curr_dur = entry.get("duration", 0)
-                new_dur, ok = QInputDialog.getInt(
-                    self, "Modifica Durata", 
-                    f"Nuova durata in ms per '{entry['name']}':", 
-                    value=curr_dur, min=0, max=3600000
-                )
+                new_dur, ok = QInputDialog.getInt(self, "Modifica", "Nuova durata ms:", value=curr_dur, min=0, max=3600000)
                 if ok:
-                    entry["duration"] = new_dur
-                    self.data_store["show"][row] = entry
-                    self.refresh_show_list_widget()
-                    self.save_data()
+                    entry["duration"] = new_dur; self.data_store["show"][row] = entry; self.refresh_show_list_widget(); self.save_data()
 
     def refresh_show_list_widget(self):
         self.show_list_widget.clear()
         for i, entry in enumerate(self.data_store["show"]):
             if isinstance(entry, str):
-                try:
-                    t, n = entry.split(":", 1)
-                    entry = {"type": t, "name": n, "duration": 0}
+                try: t, n = entry.split(":", 1); entry = {"type": t, "name": n, "duration": 0}
                 except: continue
-
             t_type = entry.get("type", "?").upper()
             name = entry.get("name", "Unknown")
             dur = entry.get("duration", 0)
-            
-            if t_type == "CUE": time_str = f"FIXED ({dur/1000}s)"
-            else: time_str = "MANUAL" if dur == 0 else f"{dur/1000}s"
-            
+            time_str = f"FIXED ({dur/1000}s)" if t_type == "CUE" else ("MANUAL" if dur == 0 else f"{dur/1000}s")
             self.show_list_widget.addItem(f"{i+1}. [{t_type}] {name}  -- ⏱ {time_str}")
 
     # --- UPDATE UI ---
@@ -341,18 +355,14 @@ class MainWindow(QMainWindow):
             if ":" in val: mapped_remote_names.append(val.split(":", 1)[1])
 
         for i, cell in enumerate(self.cells):
-            ch_num = i + 1
-            val = self.dmx.output_frame[ch_num]
-            is_sel = ch_num in self.selected_ch
-            is_map = ch_num in mapped_ids
-            cell.update_view(val, is_sel, is_map)
+            ch_num = i + 1; val = self.dmx.output_frame[ch_num]
+            cell.update_view(val, ch_num in self.selected_ch, ch_num in mapped_ids)
 
         for lst in [self.s_list, self.ch_list, self.cue_list]:
             for row in range(lst.count()):
                 item = lst.item(row)
                 target_color = QColor("#e67e22") if item.text() in mapped_remote_names else QColor("#ddd")
-                if item.foreground().color() != target_color:
-                    item.setForeground(target_color)
+                if item.foreground().color() != target_color: item.setForeground(target_color)
 
     # --- EVENTS ---
     def toggle_cell(self, ch):
@@ -383,53 +393,32 @@ class MainWindow(QMainWindow):
             self.btn_learn.setStyleSheet("background-color: #2c3e50; color: #ccc;")
             self.save_data()
 
-    def connect_hardware(self):
-        self.midi.open_port(self.midi_combo.currentText())
-        if self.dmx.connect(self.dmx_combo.currentText()):
-            QMessageBox.information(self, "Info", "Hardware Connesso!")
-        else:
-            QMessageBox.critical(self, "Errore", "Impossibile aprire porta DMX")
-
     def toggle_rec(self):
         if self.playback.is_recording_cue:
             self.playback.is_recording_cue = False
-            self.btn_rec.setText("● REGISTRA CUE")
-            self.btn_rec.setStyleSheet("color: #e74c3c; background-color: #222; font-weight: bold;")
+            self.btn_rec.setText("● REGISTRA CUE"); self.btn_rec.setStyleSheet("color: #e74c3c; background-color: #222; font-weight: bold;")
             name, ok = QInputDialog.getText(self, "Salva", "Nome Cue:")
             if ok and name:
-                self.data_store["cues"][name] = {"data": self.playback.recorded_stream}
-                self.cue_list.addItem(name)
-                self.save_data()
+                self.data_store["cues"][name] = {"data": self.playback.recorded_stream}; self.cue_list.addItem(name); self.save_data()
         else:
-            self.playback.recorded_stream = []
-            self.playback.is_recording_cue = True
-            self.btn_rec.setText("STOP REC")
-            self.btn_rec.setStyleSheet("background-color: #c0392b; color: #fff; font-weight: bold;")
+            self.playback.recorded_stream = []; self.playback.is_recording_cue = True
+            self.btn_rec.setText("STOP REC"); self.btn_rec.setStyleSheet("background-color: #c0392b; color: #fff; font-weight: bold;")
 
     def _update_list_visual_selection(self):
-        for i in range(self.s_list.count()):
-            self.s_list.item(i).setSelected(self.s_list.item(i).text() == self.playback.active_sc)
-        for i in range(self.ch_list.count()):
-            self.ch_list.item(i).setSelected(self.ch_list.item(i).text() == self.playback.active_ch)
-        for i in range(self.cue_list.count()):
-            self.cue_list.item(i).setSelected(self.cue_list.item(i).text() == self.playback.active_cue)
+        for i in range(self.s_list.count()): self.s_list.item(i).setSelected(self.s_list.item(i).text() == self.playback.active_sc)
+        for i in range(self.ch_list.count()): self.ch_list.item(i).setSelected(self.ch_list.item(i).text() == self.playback.active_ch)
+        for i in range(self.cue_list.count()): self.cue_list.item(i).setSelected(self.cue_list.item(i).text() == self.playback.active_cue)
 
     def show_context_menu(self, widget, pos, type_key):
         item = widget.itemAt(pos)
         if not item: return
-        menu = QMenu()
-        act_learn = menu.addAction("Mappa a Pulsante MIDI")
-        act_show = menu.addAction("Aggiungi a Show Manager")
-        act_del = menu.addAction("Elimina Elemento")
-        
+        menu = QMenu(); act_learn = menu.addAction("Mappa a Pulsante MIDI"); act_show = menu.addAction("Aggiungi a Show Manager"); act_del = menu.addAction("Elimina Elemento")
         res = menu.exec(widget.mapToGlobal(pos))
         if res == act_learn: self.midi.toggle_learn(f"{type_key}:{item.text()}")
         elif res == act_show: self.add_to_show(type_key, item.text())
         elif res == act_del: 
-            widget.takeItem(widget.row(item))
-            key_map = {"sc": "scenes", "ch": "chases", "cue": "cues"}
-            self.data_store[key_map[type_key]].pop(item.text(), None)
-            self.save_data()
+            widget.takeItem(widget.row(item)); key_map = {"sc": "scenes", "ch": "chases", "cue": "cues"}
+            self.data_store[key_map[type_key]].pop(item.text(), None); self.save_data()
 
     def save_scene_action(self):
         snap = {str(i): self.dmx.output_frame[i] for i in range(1, 513) if self.dmx.output_frame[i] > 0}
@@ -440,9 +429,7 @@ class MainWindow(QMainWindow):
             self.save_data()
 
     def create_chase_action(self):
-        if not self.data_store["scenes"]:
-            QMessageBox.warning(self, "Attenzione", "Crea prima delle scene!")
-            return
+        if not self.data_store["scenes"]: QMessageBox.warning(self, "Attenzione", "Crea prima delle scene!"); return
         dlg = ChaseCreatorDialog(self.data_store["scenes"], self)
         if dlg.exec():
             steps = [i.text() for i in dlg.list.selectedItems()]
@@ -450,24 +437,19 @@ class MainWindow(QMainWindow):
                 name, ok = QInputDialog.getText(self, "Nuovo Chase", "Nome Sequenza:")
                 if ok and name:
                     self.data_store["chases"][name] = {"steps": steps, "h": int(dlg.t_hold.text()), "f": int(dlg.t_fade.text())}
-                    self.ch_list.addItem(name)
-                    self.save_data()
+                    self.ch_list.addItem(name); self.save_data()
 
     def save_data(self): data_manager.save_studio_data(self.data_store)
-    
     def load_data(self):
         d = data_manager.load_studio_data()
         if d:
-            self.data_store.update(d)
-            self.s_list.clear(); self.ch_list.clear(); self.cue_list.clear()
-            self.s_list.addItems(self.data_store.get("scenes", {}).keys())
-            self.ch_list.addItems(self.data_store.get("chases", {}).keys())
-            self.cue_list.addItems(self.data_store.get("cues", {}).keys())
-            self.refresh_show_list_widget()
+            self.data_store.update(d); self.s_list.clear(); self.ch_list.clear(); self.cue_list.clear()
+            self.s_list.addItems(self.data_store.get("scenes", {}).keys()); self.ch_list.addItems(self.data_store.get("chases", {}).keys())
+            self.cue_list.addItems(self.data_store.get("cues", {}).keys()); self.refresh_show_list_widget()
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
     app.setFont(QFont("Segoe UI", 9))
     win = MainWindow()
-    win.show()
+    win.showMaximized()
     sys.exit(app.exec())
