@@ -6,10 +6,10 @@ from PyQt6.QtWidgets import (
     QHBoxLayout, QWidget, QLabel, QScrollArea, QGridLayout, QMenu, 
     QListWidget, QInputDialog, QLineEdit, QMessageBox, QSlider, QFrame
 )
-from PyQt6.QtGui import QColor, QIntValidator, QFont, QAction
+from PyQt6.QtGui import QColor, QIntValidator, QFont
 from PyQt6.QtCore import QTimer, Qt
 
-# IMPORT DAI MODULI ESISTENTI
+# IMPORT MODULI (Nessuna modifica agli altri file)
 from dmx_engine import DMXController
 from playback_engine import PlaybackEngine
 from midi_manager import MidiManager
@@ -32,27 +32,32 @@ class MainWindow(QMainWindow):
         self.playback = PlaybackEngine(self.dmx, self.data_store)
         self.midi = MidiManager(self.playback, self.dmx, self.data_store)
         
-        # Collegamenti
+        # 3. Link
         self.midi.selected_channels = self.selected_ch
         self.playback.state_changed.connect(self._update_list_visual_selection)
         self.midi.learn_status_changed.connect(self.on_learn_status_change)
         self.midi.request_ui_refresh.connect(lambda: None) 
 
-        # 3. UI
+        # 4. Timer Automazione Show
+        self.show_step_timer = QTimer()
+        self.show_step_timer.setSingleShot(True)
+        self.show_step_timer.timeout.connect(self.go_next_step)
+
+        # 5. UI & Init
         self.init_interface()
         self.load_data()
 
-        # 4. Timers
+        # 6. Timers Loop
         self.timer_ui = QTimer()
         self.timer_ui.timeout.connect(self.update_ui_frame)
         self.timer_ui.start(33) 
         
         self.timer_engine = QTimer()
         self.timer_engine.timeout.connect(self.playback.tick)
-        self.timer_engine.start(40)
+        self.timer_engine.start(40) 
 
     def init_interface(self):
-        self.setWindowTitle("MIDI-DMX Pro v.6.0 - Show Manager Restored")
+        self.setWindowTitle("MIDI-DMX Pro v.9.0 - Blackout Fix")
         self.resize(1650, 950)
         
         self.setStyleSheet("""
@@ -62,7 +67,9 @@ class MainWindow(QMainWindow):
                 background-color: #141414; border: 1px solid #2a2a2a; color: #ddd; outline: none;
             }
             QListWidget::item:selected { 
-                background-color: #1a1a1a; border: 2px solid #f1c40f; color: white; 
+                background-color: #2ecc71; 
+                color: black;
+                border: none;
             }
             QLineEdit {
                 background-color: #1a1a1a; color: #ddd; border: 1px solid #333; padding: 4px;
@@ -79,7 +86,7 @@ class MainWindow(QMainWindow):
         main_layout = QHBoxLayout(central)
         self.setCentralWidget(central)
         
-        # --- LEFT PANEL (HARDWARE & LIVE) ---
+        # --- LEFT PANEL ---
         left = QVBoxLayout()
         panel_l = QWidget(); panel_l.setFixedWidth(230); panel_l.setLayout(left)
         
@@ -93,28 +100,24 @@ class MainWindow(QMainWindow):
         left.addWidget(QLabel("DMX Port:")); left.addWidget(self.dmx_combo)
         left.addWidget(btn_conn); left.addSpacing(15)
         
-        # Live Control (MODIFICATO: Fader e Input affiancati)
+        # Live
         left.addWidget(QLabel("<b>2. LIVE CONTROL</b>"))
         self.f_label = QLabel("LIVE: 0 | 0%")
         self.f_label.setStyleSheet("color: #3498db; font-weight: bold; font-size: 12px;")
         left.addWidget(self.f_label)
         
-        # Layout orizzontale per Slider + Casellina
         fader_layout = QHBoxLayout()
-        
         self.f_slider = QSlider(Qt.Orientation.Horizontal)
         self.f_slider.setRange(0, 255); self.f_slider.setFixedHeight(25)
         self.f_slider.valueChanged.connect(self.fader_moved)
         fader_layout.addWidget(self.f_slider)
         
         self.f_input = QLineEdit()
-        self.f_input.setFixedWidth(40) # Casella piccola
-        self.f_input.setPlaceholderText("0")
+        self.f_input.setFixedWidth(40); self.f_input.setPlaceholderText("0")
         self.f_input.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.f_input.setValidator(QIntValidator(0, 255))
         self.f_input.returnPressed.connect(self.manual_fader_input)
         fader_layout.addWidget(self.f_input)
-        
         left.addLayout(fader_layout)
         
         self.btn_learn = QPushButton("LEARN MIDI CHANNELS")
@@ -122,7 +125,7 @@ class MainWindow(QMainWindow):
         self.btn_learn.clicked.connect(lambda: self.midi.toggle_learn("chans"))
         left.addWidget(self.btn_learn); left.addSpacing(15)
 
-        # Scene Statiche
+        # Scene
         left.addWidget(QLabel("<b>3. SCENE STATICHE</b>"))
         btn_save_sc = QPushButton("SALVA SCENA"); btn_save_sc.setFixedHeight(30)
         btn_save_sc.clicked.connect(self.save_scene_action)
@@ -135,7 +138,7 @@ class MainWindow(QMainWindow):
         self.s_list.customContextMenuRequested.connect(lambda p: self.show_context_menu(self.s_list, p, "sc"))
         left.addWidget(self.s_list)
         
-        # --- CENTER PANEL (GRID) ---
+        # --- CENTER PANEL ---
         self.cells = []
         grid_w = QWidget(); grid_w.setStyleSheet("background-color: #050505;")
         grid = QGridLayout(grid_w); grid.setSpacing(2); grid.setContentsMargins(5, 5, 5, 5)
@@ -145,10 +148,9 @@ class MainWindow(QMainWindow):
             c.clicked.connect(self.toggle_cell)
             grid.addWidget(c, i // GRID_COLUMNS, i % GRID_COLUMNS)
             self.cells.append(c)
-            
         scroll = QScrollArea(); scroll.setWidget(grid_w); scroll.setWidgetResizable(True); scroll.setStyleSheet("border: none;")
         
-        # --- RIGHT PANEL (CHASE, CUE, SHOW) ---
+        # --- RIGHT PANEL ---
         right = QVBoxLayout()
         panel_r = QWidget(); panel_r.setFixedWidth(280); panel_r.setLayout(right)
         
@@ -157,9 +159,7 @@ class MainWindow(QMainWindow):
         btn_mk_ch = QPushButton("CREA CHASE STEP"); btn_mk_ch.setFixedHeight(30)
         btn_mk_ch.clicked.connect(self.create_chase_action)
         right.addWidget(btn_mk_ch)
-        
-        self.ch_list = QListWidget()
-        self.ch_list.setFixedHeight(120)
+        self.ch_list = QListWidget(); self.ch_list.setFixedHeight(120)
         self.ch_list.itemClicked.connect(lambda i: self.playback.toggle_chase(i.text()))
         self.ch_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.ch_list.customContextMenuRequested.connect(lambda p: self.show_context_menu(self.ch_list, p, "ch"))
@@ -171,34 +171,29 @@ class MainWindow(QMainWindow):
         self.btn_rec.setStyleSheet("color: #e74c3c; font-weight: bold; background-color: #222;")
         self.btn_rec.clicked.connect(self.toggle_rec)
         right.addWidget(self.btn_rec)
-        
-        self.cue_list = QListWidget()
-        self.cue_list.setFixedHeight(120)
+        self.cue_list = QListWidget(); self.cue_list.setFixedHeight(120)
         self.cue_list.itemClicked.connect(lambda i: self.playback.toggle_cue(i.text()))
         self.cue_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.cue_list.customContextMenuRequested.connect(lambda p: self.show_context_menu(self.cue_list, p, "cue"))
         right.addWidget(self.cue_list)
         
-        # Separatore
         line = QFrame(); line.setFrameShape(QFrame.Shape.HLine); line.setStyleSheet("color: #444;")
         right.addWidget(line)
 
-        # SHOW MANAGER (RIPRISTINATO)
+        # SHOW MANAGER
         right.addWidget(QLabel("<b>6. SHOW MANAGER</b>"))
         self.show_list_widget = QListWidget()
         self.show_list_widget.itemDoubleClicked.connect(self.play_show_item)
-        # Context menu anche per la lista show (per rimuovere voci)
         self.show_list_widget.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.show_list_widget.customContextMenuRequested.connect(self.show_manager_context_menu)
         right.addWidget(self.show_list_widget)
         
-        self.btn_go = QPushButton("GO / NEXT")
+        self.btn_go = QPushButton("GO / NEXT ▶")
         self.btn_go.setFixedHeight(45)
         self.btn_go.clicked.connect(self.go_next_step)
-        self.btn_go.setStyleSheet("background-color: #8c4a00; color: white; font-weight: bold; font-size: 14px;")
+        self.btn_go.setStyleSheet("background-color: #d35400; color: white; font-weight: bold; font-size: 14px; border: 1px solid #a04000;")
         right.addWidget(self.btn_go)
 
-        # Blackout
         self.btn_bo = QPushButton("MASTER BLACKOUT"); self.btn_bo.setFixedHeight(40)
         self.btn_bo.setStyleSheet("background-color: #6d0000; color: white; border: 1px solid #a00; font-weight: bold;")
         self.btn_bo.clicked.connect(self.action_blackout)
@@ -206,53 +201,139 @@ class MainWindow(QMainWindow):
 
         main_layout.addWidget(panel_l); main_layout.addWidget(scroll); main_layout.addWidget(panel_r)
 
-    # --- SHOW MANAGER LOGIC ---
-    def play_show_item(self, item):
-        """Esegue l'elemento selezionato nella lista show."""
-        row_idx = self.show_list_widget.row(item)
+    # --- ACTIONS & BLACKOUT ---
+    def action_blackout(self):
+        """Spegne tutto, ferma il timer e pulisce la selezione UI."""
+        # 1. Ferma l'automazione
+        self.show_step_timer.stop()
+        self.btn_go.setText("GO / NEXT ▶")
         
-        # Parsa la stringa "tipo:nome"
-        entry_string = self.data_store["show"][row_idx]
-        try:
-            type_prefix, item_name = entry_string.split(":", 1)
-            
-            # Ferma tutto prima di cambiare (opzionale, per pulizia)
-            # self.playback.stop_all() 
-            
-            if type_prefix == "sc":
-                self.playback.toggle_scene(item_name)
-            elif type_prefix == "ch":
-                self.playback.toggle_chase(item_name)
-            elif type_prefix == "cue":
-                self.playback.toggle_cue(item_name)
-                
-            # Evidenzia nelle liste laterali
-            self._update_list_visual_selection()
-            
-        except ValueError:
-            pass
+        # 2. Resetta Engine e Buffer
+        self.playback.stop_all()
+        
+        # 3. Resetta Fader Live
+        self.f_slider.blockSignals(True)
+        self.f_slider.setValue(0)
+        self.f_slider.blockSignals(False)
+        self.f_input.setText("0")
+        self.f_label.setText("LIVE: 0 | 0%")
+        
+        # 4. FIX: Pulisce la selezione nella lista SHOW per feedback visivo
+        self.show_list_widget.clearSelection()
+        self.show_list_widget.setCurrentRow(-1)
+
+    # --- SHOW MANAGER LOGIC ---
+    def add_to_show(self, type_key, name):
+        duration = 0
+        if type_key == "cue":
+            cue_data = self.data_store["cues"].get(name, {}).get("data", [])
+            duration = len(cue_data) * 40
+            obj = {"type": type_key, "name": name, "duration": duration}
+            self.data_store["show"].append(obj)
+            self.refresh_show_list_widget()
+            self.save_data()
+            QMessageBox.information(self, "Cue Aggiunta", f"Cue aggiunta con durata fissa: {duration/1000}s")
+        else:
+            duration, ok = QInputDialog.getInt(
+                self, "Durata Step", 
+                f"Inserisci durata in ms per '{name}':\n(0 = Manuale/Infinito)", 
+                value=0, min=0, max=3600000
+            )
+            if ok:
+                obj = {"type": type_key, "name": name, "duration": duration}
+                self.data_store["show"].append(obj)
+                self.refresh_show_list_widget()
+                self.save_data()
+
+    def play_show_item(self, item):
+        self.show_step_timer.stop()
+        
+        row_idx = self.show_list_widget.row(item)
+        entry = self.data_store["show"][row_idx]
+        
+        if isinstance(entry, str): return 
+
+        t_type = entry.get("type")
+        name = entry.get("name")
+        duration = entry.get("duration", 0)
+        
+        if t_type == "sc": self.playback.toggle_scene(name)
+        elif t_type == "ch": self.playback.toggle_chase(name)
+        elif t_type == "cue": self.playback.toggle_cue(name)
+        
+        self._update_list_visual_selection()
+        
+        if duration > 0:
+            self.btn_go.setText(f"AUTO NEXT ({duration/1000}s) ▶")
+            self.show_step_timer.start(duration)
+        else:
+            self.btn_go.setText("GO / NEXT ▶")
 
     def go_next_step(self):
-        """Passa al prossimo elemento nella lista Show."""
-        if not self.data_store["show"]:
-            return
-            
+        if not self.data_store["show"]: return
         curr_row = self.show_list_widget.currentRow()
         next_row = (curr_row + 1) % len(self.data_store["show"])
-        
         self.show_list_widget.setCurrentRow(next_row)
         self.play_show_item(self.show_list_widget.item(next_row))
 
+    def show_manager_context_menu(self, pos):
+        item = self.show_list_widget.itemAt(pos)
+        if not item: return
+        
+        row = self.show_list_widget.row(item)
+        entry = self.data_store["show"][row]
+        
+        if isinstance(entry, str):
+            t, n = entry.split(":", 1)
+            entry = {"type": t, "name": n, "duration": 0}
+            self.data_store["show"][row] = entry
+
+        menu = QMenu()
+        act_time = menu.addAction("Modifica Durata Step")
+        act_del = menu.addAction("Rimuovi da Show")
+        
+        res = menu.exec(self.show_list_widget.mapToGlobal(pos))
+        
+        if res == act_del:
+            self.data_store["show"].pop(row)
+            self.refresh_show_list_widget()
+            self.save_data()
+            
+        elif res == act_time:
+            if entry["type"] == "cue":
+                QMessageBox.warning(self, "Impossibile Modificare", "La durata di una Cue è fissa.")
+            else:
+                curr_dur = entry.get("duration", 0)
+                new_dur, ok = QInputDialog.getInt(
+                    self, "Modifica Durata", 
+                    f"Nuova durata in ms per '{entry['name']}':", 
+                    value=curr_dur, min=0, max=3600000
+                )
+                if ok:
+                    entry["duration"] = new_dur
+                    self.data_store["show"][row] = entry
+                    self.refresh_show_list_widget()
+                    self.save_data()
+
     def refresh_show_list_widget(self):
-        """Ridisegna la lista dello Show Manager basandosi sui dati."""
         self.show_list_widget.clear()
         for i, entry in enumerate(self.data_store["show"]):
-            if ":" in entry:
-                t, n = entry.split(":", 1)
-                label = f"{i+1}. [{t.upper()}] {n}"
-                self.show_list_widget.addItem(label)
+            if isinstance(entry, str):
+                try:
+                    t, n = entry.split(":", 1)
+                    entry = {"type": t, "name": n, "duration": 0}
+                except: continue
 
-    # --- RENDER LOOP ---
+            t_type = entry.get("type", "?").upper()
+            name = entry.get("name", "Unknown")
+            dur = entry.get("duration", 0)
+            
+            if t_type == "CUE": time_str = f"FIXED ({dur/1000}s)"
+            else: time_str = "MANUAL" if dur == 0 else f"{dur/1000}s"
+            
+            self.show_list_widget.addItem(f"{i+1}. [{t_type}] {name}  -- ⏱ {time_str}")
+
+    # --- UPDATE UI ---
     def update_ui_frame(self):
         mapped_ids = {ch for ids in self.data_store["map"].values() for ch in ids}
         mapped_remote_names = []
@@ -273,15 +354,7 @@ class MainWindow(QMainWindow):
                 if item.foreground().color() != target_color:
                     item.setForeground(target_color)
 
-    # --- ACTIONS ---
-    def action_blackout(self):
-        self.playback.stop_all()
-        self.f_slider.blockSignals(True)
-        self.f_slider.setValue(0)
-        self.f_slider.blockSignals(False)
-        self.f_input.setText("0")
-        self.f_label.setText("LIVE: 0 | 0%")
-
+    # --- EVENTS ---
     def toggle_cell(self, ch):
         if ch in self.selected_ch: self.selected_ch.remove(ch)
         else: self.selected_ch.add(ch)
@@ -341,40 +414,21 @@ class MainWindow(QMainWindow):
         for i in range(self.cue_list.count()):
             self.cue_list.item(i).setSelected(self.cue_list.item(i).text() == self.playback.active_cue)
 
-    # --- CONTEXT MENUS ---
     def show_context_menu(self, widget, pos, type_key):
         item = widget.itemAt(pos)
         if not item: return
         menu = QMenu()
         act_learn = menu.addAction("Mappa a Pulsante MIDI")
-        act_show = menu.addAction("Aggiungi a Show Manager") # NUOVO
+        act_show = menu.addAction("Aggiungi a Show Manager")
         act_del = menu.addAction("Elimina Elemento")
         
         res = menu.exec(widget.mapToGlobal(pos))
-        
-        if res == act_learn:
-            self.midi.toggle_learn(f"{type_key}:{item.text()}")
-        elif res == act_show:
-            entry = f"{type_key}:{item.text()}"
-            self.data_store["show"].append(entry)
-            self.refresh_show_list_widget()
-            self.save_data()
+        if res == act_learn: self.midi.toggle_learn(f"{type_key}:{item.text()}")
+        elif res == act_show: self.add_to_show(type_key, item.text())
         elif res == act_del: 
             widget.takeItem(widget.row(item))
             key_map = {"sc": "scenes", "ch": "chases", "cue": "cues"}
             self.data_store[key_map[type_key]].pop(item.text(), None)
-            self.save_data()
-
-    def show_manager_context_menu(self, pos):
-        """Menu per rimuovere elementi dalla lista Show."""
-        item = self.show_list_widget.itemAt(pos)
-        if not item: return
-        menu = QMenu()
-        act_del = menu.addAction("Rimuovi da Show")
-        if menu.exec(self.show_list_widget.mapToGlobal(pos)) == act_del:
-            row = self.show_list_widget.row(item)
-            self.data_store["show"].pop(row)
-            self.refresh_show_list_widget()
             self.save_data()
 
     def save_scene_action(self):
@@ -409,7 +463,6 @@ class MainWindow(QMainWindow):
             self.s_list.addItems(self.data_store.get("scenes", {}).keys())
             self.ch_list.addItems(self.data_store.get("chases", {}).keys())
             self.cue_list.addItems(self.data_store.get("cues", {}).keys())
-            # Carica la lista Show
             self.refresh_show_list_widget()
 
 if __name__ == "__main__":

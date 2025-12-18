@@ -18,12 +18,12 @@ class DMXCell(QLabel):
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setFrameStyle(QFrame.Shape.Panel | QFrame.Shadow.Plain)
         
-        # --- MEMORIA DI STATO PER OTTIMIZZAZIONE ---
+        # Cache per ottimizzazione
         self.last_val = -1
-        self.last_sel = False
-        self.last_map = False
+        self.last_sel = None
+        self.last_map = None
         
-        # Inizializzazione stile base
+        # Inizializzazione forzata
         self.update_view(0, False, False, force=True)
         
     def mousePressEvent(self, event):
@@ -32,26 +32,40 @@ class DMXCell(QLabel):
 
     def update_view(self, val, is_sel, is_map, force=False):
         """
-        Aggiorna la grafica SOLO se i dati sono cambiati.
-        Questo elimina il lag dell'interfaccia.
+        Aggiorna la grafica.
+        MODIFICA: Se selezionato -> Sfondo Verde (#2ecc71), Testo Nero.
         """
         if not force:
             if val == self.last_val and is_sel == self.last_sel and is_map == self.last_map:
-                return # Nessun cambiamento, non faccio nulla (Risparmio CPU)
+                return
 
-        # Aggiorno la cache
         self.last_val = val
         self.last_sel = is_sel
         self.last_map = is_map
         
-        # Calcoli Grafici
         pct = int(val / 2.55)
-        border = "2px solid #f1c40f" if is_sel else "1px solid #333"
-        color_title = "#2ecc71" if is_map else "#666"
         
-        # Aggiorno HTML e CSS
-        self.setText(f"<b><font color='{color_title}'>CH {self.ch}:</font></b><br><span style='font-size: 11px; color: #FFF;'>{val} ({pct}%)</span>")
-        self.setStyleSheet(f"background-color: #0d0d0d; border: {border}; border-radius: 2px; color: #fff;")
+        # --- LOGICA COLORI ---
+        if is_sel:
+            # STILE SELEZIONATO (Verde sfondo, Nero testo)
+            bg_color = "#2ecc71" 
+            border = "1px solid #2ecc71"
+            title_color = "#000000" # Nero
+            text_color = "#000000"  # Nero
+        else:
+            # STILE NORMALE (Nero sfondo, Bianco testo)
+            bg_color = "#0d0d0d"
+            border = "1px solid #333"
+            # Se mappato è verde, altrimenti grigio scuro
+            title_color = "#2ecc71" if is_map else "#666" 
+            text_color = "#ffffff"  # Bianco
+        
+        # HTML per il testo
+        self.setText(f"<b><font color='{title_color}'>CH {self.ch}:</font></b><br>"
+                     f"<span style='font-size: 11px; color: {text_color};'>{val} ({pct}%)</span>")
+        
+        # CSS per il box
+        self.setStyleSheet(f"background-color: {bg_color}; border: {border}; border-radius: 2px;")
 
 class ChaseCreatorDialog(QDialog):
     def __init__(self, scenes, parent=None):
