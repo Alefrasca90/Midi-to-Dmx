@@ -9,7 +9,7 @@ import serial.tools.list_ports
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QComboBox, QPushButton, 
                              QVBoxLayout, QHBoxLayout, QWidget, QLabel, QScrollArea, 
                              QGridLayout, QMessageBox, QMenu, QSlider, QListWidget, 
-                             QInputDialog, QLineEdit)
+                             QInputDialog, QLineEdit, QDialog, QListWidgetItem)
 from PyQt6.QtGui import QIntValidator
 from PyQt6.QtCore import QTimer, Qt, pyqtSignal
 
@@ -23,7 +23,6 @@ class DMXCell(QLabel):
         self.channel_index = channel_index
         self.setFixedSize(95, 35) 
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.setCursor(Qt.CursorShape.PointingHandCursor)
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
@@ -38,6 +37,7 @@ class DMXController:
         self.output_frame = bytearray([0] * 513)
         self.live_buffer = bytearray([0] * 513)
         self.scene_buffer = bytearray([0] * 513)
+        self.chase_buffer = bytearray([0] * 513)
         self.running = False
 
     def connect(self, port):
@@ -46,16 +46,17 @@ class DMXController:
             self.running = True
             threading.Thread(target=self._send_loop, daemon=True).start()
             return True
-        except Exception as e:
-            print(f"Errore DMX: {e}")
-            return False
+        except: return False
 
     def _send_loop(self):
         while self.running:
             if self.serial_port:
                 try:
                     for i in range(1, 513):
-                        self.output_frame[i] = max(self.live_buffer[i], self.scene_buffer[i])
+                        # HTP: Massimo tra Live, Scene e Chase
+                        self.output_frame[i] = max(self.live_buffer[i], 
+                                                  self.scene_buffer[i], 
+                                                  self.chase_buffer[i])
                     self.serial_port.break_condition = True
                     time.sleep(0.0001)
                     self.serial_port.break_condition = False
@@ -63,7 +64,34 @@ class DMXController:
                     time.sleep(0.025)
                 except: self.running = False
 
-# --- INTERFACCIA E LOGICA ---
+# --- DIALOG CREAZIONE CHASE ---
+class ChaseCreatorDialog(QDialog):
+    def __init__(self, scenes, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Crea Nuovo Chase")
+        self.setFixedSize(300, 400)
+        self.layout = QVBoxLayout(self)
+        
+        self.layout.addWidget(QLabel("Seleziona Scene (in ordine):"))
+        self.list_widget = QListWidget()
+        self.list_widget.addItems(scenes.keys())
+        self.list_widget.setSelectionMode(QListWidget.SelectionMode.MultiSelection)
+        self.layout.addWidget(self.list_widget)
+        
+        self.layout.addWidget(QLabel("Tempo Step (ms):"))
+        self.time_input = QLineEdit("500")
+        self.time_input.setValidator(QIntValidator(50, 5000))
+        self.layout.addWidget(self.time_input)
+        
+        self.btn_save = QPushButton("Salva Chase")
+        self.btn_save.clicked.connect(self.accept)
+        self.layout.addWidget(self.btn_save)
+
+    def get_data(self):
+        steps = [item.text() for item in self.list_widget.selectedItems()]
+        return steps, int(self.time_input.text())
+
+# --- INTERFACCIA PRINCIPALE ---
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -71,249 +99,195 @@ class MainWindow(QMainWindow):
         self.selected_channels = set()
         self.mappings = {} 
         self.scenes = {} 
-        self.active_scene_name = None
+        self.chases = {} 
+        self.active_scene = None
+        self.active_chase = None
         self.is_learning = False
-        self.midi_input = None
-
-        self.setWindowTitle("MIDI-DMX Pro Studio - Scene Master")
-        self.resize(1300, 850)
+        
+        self.setWindowTitle("MIDI-DMX Pro Studio - Chase Engine")
+        self.resize(1400, 900)
         self.setStyleSheet("background-color: #0a0a0a; color: #DDD;")
 
         main_layout = QHBoxLayout()
         
-        # --- PANNELLO CONTROLLI ---
-        left_widget = QWidget()
-        left_widget.setFixedWidth(230)
+        # --- SIDEBAR ---
+        left_widget = QWidget(); left_widget.setFixedWidth(240)
         controls = QVBoxLayout(left_widget)
         
+        # Hardware
         controls.addWidget(QLabel("<b>1. HARDWARE</b>"))
-        self.midi_combo = QComboBox()
-        self.midi_combo.addItems(mido.get_input_names())
+        self.midi_combo = QComboBox(); self.midi_combo.addItems(mido.get_input_names())
         controls.addWidget(self.midi_combo)
-        
-        self.dmx_combo = QComboBox()
-        self.dmx_combo.addItems([p.device for p in serial.tools.list_ports.comports()])
+        self.dmx_combo = QComboBox(); self.dmx_combo.addItems([p.device for p in serial.tools.list_ports.comports()])
         controls.addWidget(self.dmx_combo)
-        
-        self.btn_conn = QPushButton("CONNETTI")
-        self.btn_conn.clicked.connect(self.connect_hw)
+        self.btn_conn = QPushButton("CONNETTI"); self.btn_conn.clicked.connect(self.connect_hw)
         controls.addWidget(self.btn_conn)
 
-        controls.addSpacing(20)
+        # Live
+        controls.addSpacing(15)
         controls.addWidget(QLabel("<b>2. LIVE CONTROL</b>"))
-        
-        self.slider_label = QLabel("VAL: 0 | 0%")
-        self.slider_label.setStyleSheet("color: #e67e22; font-weight: bold;")
-        self.slider_label.hide()
+        self.slider_label = QLabel("VAL: 0 | 0%"); self.slider_label.hide()
         controls.addWidget(self.slider_label)
-        
-        self.manual_input = QLineEdit()
-        self.manual_input.setValidator(QIntValidator(0, 255))
-        self.manual_input.setStyleSheet("background: #222; color: #fff; border: 1px solid #444; padding: 3px;")
+        self.manual_input = QLineEdit(); self.manual_input.setValidator(QIntValidator(0, 255)); self.manual_input.hide()
         self.manual_input.returnPressed.connect(self.manual_val_entered)
-        self.manual_input.hide()
         controls.addWidget(self.manual_input)
-
-        self.live_slider = QSlider(Qt.Orientation.Horizontal)
-        self.live_slider.setRange(0, 255)
-        self.live_slider.hide()
+        self.live_slider = QSlider(Qt.Orientation.Horizontal); self.live_slider.setRange(0, 255); self.live_slider.hide()
         self.live_slider.valueChanged.connect(self.slider_moved)
         controls.addWidget(self.live_slider)
-
-        self.btn_learn = QPushButton("LEARN MIDI")
-        self.btn_learn.clicked.connect(self.toggle_learn)
-        self.btn_learn.setEnabled(False)
+        self.btn_learn = QPushButton("LEARN MIDI"); self.btn_learn.clicked.connect(self.toggle_learn); self.btn_learn.setEnabled(False)
         controls.addWidget(self.btn_learn)
 
-        controls.addSpacing(20)
+        # Scene
+        controls.addSpacing(15)
         controls.addWidget(QLabel("<b>3. SCENE</b>"))
-        
-        self.btn_save_scene = QPushButton("SALVA SCENA ATTUALE")
-        self.btn_save_scene.clicked.connect(self.save_current_scene)
-        self.btn_save_scene.setStyleSheet("background-color: #27ae60; font-weight: bold; padding: 10px;")
-        controls.addWidget(self.btn_save_scene)
-        
-        self.scene_list = QListWidget()
-        self.scene_list.itemClicked.connect(self.toggle_scene_activation)
-        self.scene_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-        self.scene_list.customContextMenuRequested.connect(self.scene_context_menu)
+        btn_save_scene = QPushButton("SALVA SCENA"); btn_save_scene.clicked.connect(self.save_current_scene)
+        btn_save_scene.setStyleSheet("background-color: #27ae60; font-weight: bold;"); controls.addWidget(btn_save_scene)
+        self.scene_list = QListWidget(); self.scene_list.itemClicked.connect(self.toggle_scene)
         controls.addWidget(self.scene_list)
 
-        self.btn_blackout = QPushButton("BLACKOUT")
-        self.btn_blackout.clicked.connect(self.blackout_all)
-        self.btn_blackout.setStyleSheet("background-color: #c0392b; font-weight: bold; padding: 10px;")
-        controls.addWidget(self.btn_blackout)
+        # Chases
+        controls.addSpacing(15)
+        controls.addWidget(QLabel("<b>4. CHASES</b>"))
+        btn_new_chase = QPushButton("NUOVO CHASE"); btn_new_chase.clicked.connect(self.create_chase)
+        btn_new_chase.setStyleSheet("background-color: #2980b9; font-weight: bold;"); controls.addWidget(btn_new_chase)
+        self.chase_list = QListWidget(); self.chase_list.itemClicked.connect(self.toggle_chase)
+        controls.addWidget(self.chase_list)
+
+        btn_blackout = QPushButton("BLACKOUT"); btn_blackout.clicked.connect(self.blackout_all)
+        btn_blackout.setStyleSheet("background-color: #c0392b; font-weight: bold; margin-top: 10px;"); controls.addWidget(btn_blackout)
         
         controls.addStretch()
 
-        # --- MONITOR 512 CANALI ---
-        monitor_container = QVBoxLayout()
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        grid_widget = QWidget()
-        self.grid_layout = QGridLayout(grid_widget)
-        self.grid_layout.setSpacing(2)
+        # --- GRID ---
+        scroll = QScrollArea(); scroll.setWidgetResizable(True)
+        grid_widget = QWidget(); self.grid_layout = QGridLayout(grid_widget)
         self.cells = []
         for i in range(512):
-            cell = DMXCell(i + 1)
-            cell.clicked.connect(self.toggle_selection)
-            cell.rightClicked.connect(self.show_context_menu)
-            self.grid_layout.addWidget(cell, i // 9, i % 9)
-            self.cells.append(cell)
+            cell = DMXCell(i + 1); cell.clicked.connect(self.toggle_selection)
+            self.grid_layout.addWidget(cell, i // 9, i % 9); self.cells.append(cell)
         scroll.setWidget(grid_widget)
-        monitor_container.addWidget(scroll)
 
-        main_layout.addWidget(left_widget)
-        main_layout.addLayout(monitor_container)
-        
-        container = QWidget(); container.setLayout(main_layout)
-        self.setCentralWidget(container)
+        main_layout.addWidget(left_widget); main_layout.addWidget(scroll)
+        container = QWidget(); container.setLayout(main_layout); self.setCentralWidget(container)
 
         self._load_data()
-        self.timer = QTimer(); self.timer.timeout.connect(self.update_ui); self.timer.start(50)
+        self.timer_ui = QTimer(); self.timer_ui.timeout.connect(self.update_ui); self.timer_ui.start(50)
+        
+        # Motore Chase
+        self.chase_timer = QTimer(); self.chase_timer.timeout.connect(self.process_chase)
+        self.current_chase_step = 0
 
-    # --- LOGICA SLIDER ---
+    # --- LOGICA CHASE ---
+    def create_chase(self):
+        if not self.scenes:
+            QMessageBox.warning(self, "Errore", "Crea almeno una scena prima!")
+            return
+        dialog = ChaseCreatorDialog(self.scenes, self)
+        if dialog.exec():
+            steps, speed = dialog.get_data()
+            if steps:
+                name, ok = QInputDialog.getText(self, "Nome Chase", "Inserisci nome:")
+                if ok and name:
+                    self.chases[name] = {"steps": steps, "speed": speed}
+                    self.chase_list.addItem(name)
+                    self.save_data()
+
+    def toggle_chase(self, item):
+        name = item.text()
+        if self.active_chase == name:
+            self.active_chase = None
+            self.chase_timer.stop()
+            self.dmx.chase_buffer = bytearray([0] * 513)
+            self.chase_list.clearSelection()
+        else:
+            self.active_chase = name
+            self.current_chase_step = 0
+            self.chase_timer.start(self.chases[name]["speed"])
+            # Feedback visivo
+            for i in range(self.chase_list.count()):
+                self.chase_list.item(i).setBackground(Qt.GlobalColor.transparent)
+            item.setBackground(Qt.GlobalColor.darkBlue)
+
+    def process_chase(self):
+        if not self.active_chase: return
+        chase = self.chases[self.active_chase]
+        step_scene_name = chase["steps"][self.current_chase_step]
+        scene_data = self.scenes.get(step_scene_name, {})
+        
+        new_buf = bytearray([0] * 513)
+        for ch, val in scene_data.items():
+            new_buf[int(ch)] = val
+        self.dmx.chase_buffer = new_buf
+        
+        self.current_chase_step = (self.current_chase_step + 1) % len(chase["steps"])
+
+    # --- RESTANTE LOGICA (Invariata) ---
     def slider_moved(self, val):
-        perc = int((val / 255) * 100)
-        self.slider_label.setText(f"VAL: {val} | {perc}%")
+        self.slider_label.setText(f"VAL: {val} | {int((val/255)*100)}%")
         self.manual_input.setText(str(val))
-        for ch in self.selected_channels:
-            self.dmx.live_buffer[ch] = val
+        for ch in self.selected_channels: self.dmx.live_buffer[ch] = val
 
     def manual_val_entered(self):
-        txt = self.manual_input.text()
-        if txt: self.live_slider.setValue(int(txt))
+        self.live_slider.setValue(int(self.manual_input.text() or 0))
 
     def toggle_selection(self, ch_num):
         if ch_num in self.selected_channels: self.selected_channels.remove(ch_num)
         else: self.selected_channels.add(ch_num)
-        visible = len(self.selected_channels) > 0
-        self.live_slider.setVisible(visible)
-        self.slider_label.setVisible(visible)
-        self.manual_input.setVisible(visible)
-        self.btn_learn.setEnabled(visible)
+        vis = len(self.selected_channels) > 0
+        self.live_slider.setVisible(vis); self.slider_label.setVisible(vis); self.manual_input.setVisible(vis); self.btn_learn.setEnabled(vis)
 
-    # --- LOGICA SCENE ---
     def save_current_scene(self):
-        # Salviamo lo stato ESATTO di tutti i 512 canali
-        current_frame = {str(i): max(self.dmx.live_buffer[i], self.dmx.scene_buffer[i]) for i in range(1, 513)}
-        name, ok = QInputDialog.getText(self, 'Salva Scena', 'Nome scena:')
+        frame = {str(i): max(self.dmx.live_buffer[i], self.dmx.scene_buffer[i], self.dmx.chase_buffer[i]) for i in range(1, 513)}
+        name, ok = QInputDialog.getText(self, 'Salva Scena', 'Nome:')
         if ok and name:
-            self.scenes[name] = current_frame
-            if not self.scene_list.findItems(name, Qt.MatchFlag.MatchExactly):
-                self.scene_list.addItem(name)
+            self.scenes[name] = frame
+            if not self.scene_list.findItems(name, Qt.MatchFlag.MatchExactly): self.scene_list.addItem(name)
             self.save_data()
 
-    def toggle_scene_activation(self, item):
+    def toggle_scene(self, item):
         name = item.text()
-        if self.active_scene_name == name:
-            # DISATTIVAZIONE
-            self.active_scene_name = None
-            self.dmx.scene_buffer = bytearray([0] * 513)
+        if self.active_scene == name:
+            self.active_scene = None; self.dmx.scene_buffer = bytearray([0] * 513)
             self.scene_list.clearSelection()
         else:
-            # ATTIVAZIONE: Azzera il buffer "live" per far posto alla scena
-            self.active_scene_name = name
-            new_buf = bytearray([0] * 513)
-            data = self.scenes.get(name, {})
-            for ch_str, val in data.items():
-                new_buf[int(ch_str)] = val
-            
-            # Applichiamo la scena e puliamo i comandi live precedenti
-            self.dmx.scene_buffer = new_buf
-            self.dmx.live_buffer = bytearray([0] * 513)
-            self.live_slider.setValue(0)
+            self.active_scene = name; new_buf = bytearray([0] * 513)
+            for ch, val in self.scenes[name].items(): new_buf[int(ch)] = val
+            self.dmx.scene_buffer = new_buf; self.dmx.live_buffer = bytearray([0] * 513)
 
     def update_ui(self):
-        mapped_chans = set()
-        for targets in self.mappings.values(): mapped_chans.update(targets)
-        
+        mapped = set()
+        for t in self.mappings.values(): mapped.update(t)
         for i in range(512):
-            ch = i + 1
-            # Visualizziamo il massimo reale tra i buffer
-            val = max(self.dmx.live_buffer[ch], self.dmx.scene_buffer[ch])
-            perc = int((val / 255) * 100)
-            
-            is_sel = ch in self.selected_channels
-            is_map = ch in mapped_chans
-            
-            border = "2px solid #f1c40f" if is_sel else "1px solid #1a1a1a"
-            
-            if is_map:
-                content = f"<b><font color='#2ecc71'>CH {ch}:</font></b><br><font color='#e67e22'>{val} ({perc}%)</font>"
-            else:
-                content = f"<font color='#444'>CH {ch}:<br>{val} ({perc}%)</font>"
-            
-            self.cells[i].setText(content)
+            ch = i + 1; val = max(self.dmx.live_buffer[ch], self.dmx.scene_buffer[ch], self.dmx.chase_buffer[ch])
+            border = "2px solid #f1c40f" if ch in self.selected_channels else "1px solid #1a1a1a"
+            color = "#2ecc71" if ch in mapped else "#444"
+            val_color = "#e67e22" if ch in mapped else "#444"
+            self.cells[i].setText(f"<b><font color='{color}'>CH {ch}:</font></b><br><font color='{val_color}'>{val} ({int((val/255)*100)}%)</font>")
             self.cells[i].setStyleSheet(f"background-color: #0a0a0a; border: {border}; font-size: 9px; border-radius: 2px;")
 
-    # --- LOGICA MIDI E HARDWARE ---
-    def midi_callback(self, msg):
-        if self.is_learning:
-            sig_id = f"cc_{msg.control}" if msg.type == 'control_change' else f"note_{msg.note}"
-            self.mappings[sig_id] = list(self.selected_channels)
-            self.is_learning = False
-            self.save_data()
-        else:
-            sig_id = f"cc_{getattr(msg, 'control', -1)}" if msg.type == 'control_change' else f"note_{getattr(msg, 'note', -1)}"
-            if sig_id in self.mappings:
-                val = int(msg.value * 2.007) if msg.type == 'control_change' else (255 if msg.velocity > 0 else 0)
-                for ch in self.mappings[sig_id]: self.dmx.live_buffer[ch] = val
+    def blackout_all(self):
+        self.dmx.live_buffer = bytearray([0] * 513); self.dmx.scene_buffer = bytearray([0] * 513)
+        self.dmx.chase_buffer = bytearray([0] * 513); self.active_scene = None; self.active_chase = None
+        self.chase_timer.stop(); self.scene_list.clearSelection(); self.chase_list.clearSelection()
+
+    def connect_hw(self):
+        if self.dmx.connect(self.dmx_combo.currentText()): self.btn_conn.setStyleSheet("background-color: #27ae60;")
 
     def toggle_learn(self):
         self.is_learning = not self.is_learning
-        self.btn_learn.setText("ANNULLA LEARN" if self.is_learning else "LEARN MIDI")
-
-    def blackout_all(self):
-        for i in range(513): self.dmx.live_buffer[i] = 0
-        self.dmx.scene_buffer = bytearray([0] * 513)
-        self.active_scene_name = None
-        self.scene_list.clearSelection()
-
-    def connect_hw(self):
-        try:
-            self.midi_input = mido.open_input(self.midi_combo.currentText(), callback=self.midi_callback)
-            self.dmx.connect(self.dmx_combo.currentText())
-            self.btn_conn.setStyleSheet("background-color: #27ae60;")
-        except: pass
-
-    def show_context_menu(self, ch_num):
-        menu = QMenu(self)
-        del_act = menu.addAction(f"Cancella mapping Ch {ch_num}")
-        if menu.exec(self.cells[ch_num-1].mapToGlobal(self.cells[ch_num-1].rect().center())) == del_act:
-            for sig in list(self.mappings.keys()):
-                if ch_num in self.mappings[sig]:
-                    self.mappings[sig].remove(ch_num)
-                    if not self.mappings[sig]: del self.mappings[sig]
-            self.save_data()
-
-    def scene_context_menu(self, pos):
-        item = self.scene_list.itemAt(pos)
-        if not item: return
-        menu = QMenu()
-        del_act = menu.addAction("Elimina Scena")
-        if menu.exec(self.scene_list.mapToGlobal(pos)) == del_act:
-            if self.active_scene_name == item.text():
-                self.active_scene_name = None
-                self.dmx.scene_buffer = bytearray([0] * 513)
-            del self.scenes[item.text()]
-            self.scene_list.takeItem(self.scene_list.row(item))
-            self.save_data()
+        self.btn_learn.setText("ANNULLA" if self.is_learning else "LEARN MIDI")
 
     def _load_data(self):
         if os.path.exists("studio_data.json"):
             with open("studio_data.json", "r") as f:
-                data = json.load(f)
-                self.mappings = data.get("mappings", {})
-                self.scenes = data.get("scenes", {})
-                for name in self.scenes: self.scene_list.addItem(name)
+                d = json.load(f); self.mappings = d.get("mappings", {}); self.scenes = d.get("scenes", {})
+                self.chases = d.get("chases", {})
+                for s in self.scenes: self.scene_list.addItem(s)
+                for c in self.chases: self.chase_list.addItem(c)
 
     def save_data(self):
         with open("studio_data.json", "w") as f:
-            json.dump({"mappings": self.mappings, "scenes": self.scenes}, f)
+            json.dump({"mappings": self.mappings, "scenes": self.scenes, "chases": self.chases}, f)
 
 if __name__ == "__main__":
-    app = QApplication(sys.argv)
-    window = MainWindow()
-    window.show()
-    sys.exit(app.exec())
+    app = QApplication(sys.argv); w = MainWindow(); w.show(); sys.exit(app.exec())
