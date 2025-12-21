@@ -1,7 +1,7 @@
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QTabWidget, QComboBox, 
     QPushButton, QLineEdit, QListWidget, QSlider, QGridLayout, QScrollArea,
-    QAbstractItemView, QFrame
+    QAbstractItemView, QCheckBox, QProgressBar, QGroupBox, QFrame
 )
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QIntValidator
@@ -11,9 +11,8 @@ from gui_components import DMXCell, GRID_COLUMNS
 
 class UIBuilder:
     def setup_ui(self, mw):
-        """Costruisce l'interfaccia grafica collegandola alla main_window (mw)"""
-        mw.setWindowTitle("MIDI-DMX Pro v.17.0 - Refactored Edition")
-        mw.resize(1200, 800)
+        mw.setWindowTitle("MIDI-DMX Pro v.18.0 - Audio Reactive")
+        mw.resize(1250, 850)
         
         mw.setStyleSheet("""
             QMainWindow { background-color: #0f0f0f; }
@@ -28,6 +27,8 @@ class UIBuilder:
             QTabBar::tab:selected { background: #333; color: white; border-bottom: 2px solid #3498db; }
             QMenu { background-color: #222; color: white; border: 1px solid #555; }
             QMenu::item:selected { background-color: #3498db; }
+            QProgressBar { border: 1px solid #333; background-color: #111; text-align: center; }
+            QProgressBar::chunk { background-color: #e67e22; }
         """)
         
         central = QWidget()
@@ -35,20 +36,19 @@ class UIBuilder:
         layout.setContentsMargins(10, 10, 10, 10)
         mw.setCentralWidget(central)
         
-        # Costruzione dei tre pannelli
         self._build_left_panel(mw, layout)
         self._build_center_panel(mw, layout)
         self._build_right_panel(mw, layout)
 
     def _build_left_panel(self, mw, parent_layout):
-        panel = QWidget(); panel.setFixedWidth(260)
+        panel = QWidget(); panel.setFixedWidth(280)
         left = QVBoxLayout(panel)
         
         # 1. HARDWARE
-        left.addWidget(QLabel("<b>1. OUTPUT SETUP</b>"))
-        mw.hw_tabs = QTabWidget(); mw.hw_tabs.setFixedHeight(140)
+        left.addWidget(QLabel("<b>1. OUTPUT & AUDIO</b>"))
+        mw.hw_tabs = QTabWidget(); mw.hw_tabs.setFixedHeight(180)
         
-        # Serial Tab
+        # Serial
         t_ser = QWidget(); l_ser = QVBoxLayout(t_ser)
         mw.dmx_combo = QComboBox()
         try: mw.dmx_combo.addItems([p.device for p in serial.tools.list_ports.comports()])
@@ -57,7 +57,7 @@ class UIBuilder:
         l_ser.addWidget(QLabel("Porta DMX:")); l_ser.addWidget(mw.dmx_combo); l_ser.addWidget(btn_ser)
         mw.hw_tabs.addTab(t_ser, "USB DMX")
         
-        # ArtNet Tab
+        # ArtNet
         t_art = QWidget(); l_art = QVBoxLayout(t_art)
         row_ip = QHBoxLayout()
         mw.art_ip = QLineEdit("127.0.0.1"); mw.art_uni = QLineEdit("0"); mw.art_uni.setFixedWidth(30)
@@ -65,6 +65,25 @@ class UIBuilder:
         btn_art = QPushButton("ATTIVA ART-NET"); btn_art.clicked.connect(mw.connect_artnet)
         l_art.addLayout(row_ip); l_art.addWidget(btn_art)
         mw.hw_tabs.addTab(t_art, "ART-NET")
+
+        # AUDIO TAB (NUOVO)
+        t_aud = QWidget(); l_aud = QVBoxLayout(t_aud); l_aud.setContentsMargins(5,5,5,5)
+        mw.audio_combo = QComboBox() # Popolato dal main
+        mw.btn_audio_start = QPushButton("START LISTENING"); mw.btn_audio_start.setCheckable(True)
+        mw.btn_audio_start.clicked.connect(mw.toggle_audio_engine)
+        mw.btn_audio_start.setStyleSheet("background-color: #2c3e50; color: #ccc;")
+        
+        l_aud.addWidget(QLabel("Input Device:"))
+        l_aud.addWidget(mw.audio_combo)
+        l_aud.addWidget(mw.btn_audio_start)
+        
+        h_vis = QHBoxLayout()
+        mw.prog_vol = QProgressBar(); mw.prog_vol.setRange(0, 255); mw.prog_vol.setFixedHeight(8); mw.prog_vol.setTextVisible(False)
+        mw.ind_beat = QLabel("⬤"); mw.ind_beat.setStyleSheet("color:#333; font-size:18px;")
+        h_vis.addWidget(QLabel("Vol:")); h_vis.addWidget(mw.prog_vol); h_vis.addWidget(mw.ind_beat)
+        l_aud.addLayout(h_vis)
+        
+        mw.hw_tabs.addTab(t_aud, "AUDIO FX")
         left.addWidget(mw.hw_tabs)
         
         # MIDI
@@ -73,19 +92,34 @@ class UIBuilder:
         try: mw.midi_combo.addItems(mido.get_input_names())
         except: pass
         btn_m = QPushButton("OK"); btn_m.setFixedWidth(40); btn_m.clicked.connect(mw.connect_midi)
-        midi_box.addWidget(QLabel("MIDI IN:")); midi_box.addWidget(mw.midi_combo); midi_box.addWidget(btn_m)
+        midi_box.addWidget(QLabel("MIDI:")); midi_box.addWidget(mw.midi_combo); midi_box.addWidget(btn_m)
         left.addLayout(midi_box)
-        
         mw.lbl_midi_monitor = QLabel("DISCONNECTED")
         mw.lbl_midi_monitor.setStyleSheet("color: #666; font-size: 11px; border: 1px solid #333; padding: 2px;")
         mw.lbl_midi_monitor.setAlignment(Qt.AlignmentFlag.AlignCenter)
         left.addWidget(mw.lbl_midi_monitor); left.addSpacing(10)
         
-        # 2. LIVE CONTROL
-        left.addWidget(QLabel("<b>2. LIVE CONTROL</b>"))
+        # 2. AUDIO REACTION & LIVE
+        left.addWidget(QLabel("<b>2. REAZIONI & LIVE</b>"))
+        
+        react_box = QGroupBox("Audio Triggers")
+        react_box.setStyleSheet("QGroupBox { border: 1px solid #333; margin-top: 5px; padding-top: 10px; }")
+        l_react = QVBoxLayout(react_box); l_react.setSpacing(5)
+        
+        l_react.addWidget(QLabel("Mic Gain:"))
+        mw.sl_gain = QSlider(Qt.Orientation.Horizontal); mw.sl_gain.setRange(1, 50); mw.sl_gain.setValue(10)
+        mw.sl_gain.valueChanged.connect(mw.on_gain_change)
+        l_react.addWidget(mw.sl_gain)
+        
+        mw.chk_beat_chase = QCheckBox("BEAT -> Next Step"); mw.chk_beat_chase.setToolTip("Avanza Chase col Bass Beat")
+        l_react.addWidget(mw.chk_beat_chase)
+        mw.chk_vol_dimmer = QCheckBox("VOLUME -> Master Dimmer"); mw.chk_vol_dimmer.setToolTip("Volume controlla Fader Live")
+        l_react.addWidget(mw.chk_vol_dimmer)
+        left.addWidget(react_box)
+        
+        left.addSpacing(5)
         mw.f_label = QLabel("LIVE: 0 | 0%"); mw.f_label.setStyleSheet("color: #3498db; font-weight: bold;")
         left.addWidget(mw.f_label)
-        
         f_lay = QHBoxLayout()
         mw.f_slider = QSlider(Qt.Orientation.Horizontal); mw.f_slider.setRange(0, 255); mw.f_slider.valueChanged.connect(mw.fader_moved)
         mw.f_input = QLineEdit(); mw.f_input.setFixedWidth(40); mw.f_input.returnPressed.connect(mw.manual_fader_input)
@@ -94,37 +128,29 @@ class UIBuilder:
         
         mw.btn_learn = QPushButton("LEARN MIDI CHANNELS"); mw.btn_learn.clicked.connect(lambda: mw.midi.toggle_learn("chans"))
         left.addWidget(mw.btn_learn)
-        
-        mw.btn_reset_map = QPushButton("ELIMINA TUTTE LE MAPPATURE MIDI")
-        mw.btn_reset_map.setStyleSheet("color: #c0392b; border: 1px solid #555; margin-top: 5px;")
+        mw.btn_reset_map = QPushButton("ELIMINA MIDI MAP"); mw.btn_reset_map.setStyleSheet("color:#c0392b; border:1px solid #555;")
         mw.btn_reset_map.clicked.connect(mw.reset_all_midi_channels)
-        left.addWidget(mw.btn_reset_map); left.addSpacing(10)
+        left.addWidget(mw.btn_reset_map)
+        left.addSpacing(10)
         
         # 3. RISORSE
         left.addWidget(QLabel("<b>3. RISORSE</b>"))
         mw.sg_tabs = QTabWidget(); mw.sg_tabs.setStyleSheet("QTabWidget::pane { border: 1px solid #333; }")
         
-        # Scene Tab
         t_sc = QWidget(); l_sc = QVBoxLayout(t_sc); l_sc.setContentsMargins(2,2,2,2)
         btn_ss = QPushButton("SALVA SCENA"); btn_ss.clicked.connect(mw.save_scene_action)
-        mw.s_list = QListWidget()
-        mw.s_list.itemClicked.connect(lambda i: mw.playback.toggle_scene(i.text()))
+        mw.s_list = QListWidget(); mw.s_list.itemClicked.connect(lambda i: mw.playback.toggle_scene(i.text()))
         mw.s_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         mw.s_list.customContextMenuRequested.connect(lambda p: mw.show_context_menu(mw.s_list, p, "sc"))
-        l_sc.addWidget(btn_ss); l_sc.addWidget(mw.s_list)
-        mw.sg_tabs.addTab(t_sc, "SCENE")
+        l_sc.addWidget(btn_ss); l_sc.addWidget(mw.s_list); mw.sg_tabs.addTab(t_sc, "SCENE")
         
-        # Gruppi Tab
         t_gr = QWidget(); l_gr = QVBoxLayout(t_gr); l_gr.setContentsMargins(2,2,2,2)
         btn_mg = QPushButton("CREA GRUPPO"); btn_mg.clicked.connect(mw.create_group_action)
-        mw.g_list = QListWidget()
-        mw.g_list.itemClicked.connect(lambda i: mw.select_group(i.text()))
+        mw.g_list = QListWidget(); mw.g_list.itemClicked.connect(lambda i: mw.select_group(i.text()))
         mw.g_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         mw.g_list.customContextMenuRequested.connect(lambda p: mw.show_context_menu(mw.g_list, p, "grp"))
-        l_gr.addWidget(btn_mg); l_gr.addWidget(mw.g_list)
-        mw.sg_tabs.addTab(t_gr, "GRUPPI")
+        l_gr.addWidget(btn_mg); l_gr.addWidget(mw.g_list); mw.sg_tabs.addTab(t_gr, "GRUPPI")
         
-        # Fixture Tab
         t_fx = QWidget(); l_fx = QVBoxLayout(t_fx); l_fx.setContentsMargins(2,2,2,2)
         btn_nf = QPushButton("NUOVA FIXTURE"); btn_nf.clicked.connect(mw.create_fixture_action)
         mw.btn_color_pick = QPushButton("🎨 PICK COLOR"); mw.btn_color_pick.setStyleSheet("background-color: #8e44ad; color: white;")
@@ -143,14 +169,9 @@ class UIBuilder:
         mw.cells = []
         grid_w = QWidget(); grid_w.setStyleSheet("background-color: #050505;")
         grid = QGridLayout(grid_w); grid.setSpacing(2); grid.setContentsMargins(5, 5, 5, 5)
-        
         for i in range(512):
-            c = DMXCell(i + 1)
-            c.clicked.connect(mw.toggle_cell)
-            c.right_clicked.connect(mw.cell_context_menu)
-            grid.addWidget(c, i // GRID_COLUMNS, i % GRID_COLUMNS)
-            mw.cells.append(c)
-            
+            c = DMXCell(i + 1); c.clicked.connect(mw.toggle_cell); c.right_clicked.connect(mw.cell_context_menu)
+            grid.addWidget(c, i // GRID_COLUMNS, i % GRID_COLUMNS); mw.cells.append(c)
         scroll = QScrollArea(); scroll.setWidget(grid_w); scroll.setWidgetResizable(True); scroll.setStyleSheet("border: none;")
         parent_layout.addWidget(scroll)
 
@@ -158,8 +179,7 @@ class UIBuilder:
         panel = QWidget(); panel.setFixedWidth(280)
         right = QVBoxLayout(panel)
         
-        # Chase
-        right.addWidget(QLabel("<b>4. CHASE (SEQUENZE)</b>"))
+        right.addWidget(QLabel("<b>4. CHASE</b>"))
         r_btns = QHBoxLayout()
         b_man = QPushButton("MANUALE"); b_man.clicked.connect(mw.create_chase_action)
         b_wiz = QPushButton("✨ FX WIZARD"); b_wiz.setStyleSheet("background-color: #e67e22; color: white;")
@@ -172,7 +192,6 @@ class UIBuilder:
         mw.ch_list.customContextMenuRequested.connect(lambda p: mw.show_context_menu(mw.ch_list, p, "ch"))
         right.addWidget(mw.ch_list)
         
-        # Speed Masters
         spd_box = QWidget(); spd_box.setStyleSheet("background-color: #1a1a1a; margin-top: 5px;")
         l_spd = QVBoxLayout(spd_box); l_spd.setSpacing(2)
         mw.lbl_speed = QLabel("HOLD TIME %: 100%"); l_spd.addWidget(mw.lbl_speed)
@@ -181,7 +200,6 @@ class UIBuilder:
         mw.sl_speed.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         mw.sl_speed.customContextMenuRequested.connect(lambda p: mw.show_slider_context(p, "chase_speed"))
         l_spd.addWidget(mw.sl_speed)
-        
         mw.lbl_fade = QLabel("FADE TIME %: 100%"); l_spd.addWidget(mw.lbl_fade)
         mw.sl_fade = QSlider(Qt.Orientation.Horizontal); mw.sl_fade.setRange(0, 255); mw.sl_fade.setValue(127)
         mw.sl_fade.valueChanged.connect(mw.on_fade_change)
@@ -190,12 +208,10 @@ class UIBuilder:
         l_spd.addWidget(mw.sl_fade)
         right.addWidget(spd_box)
         
-        # Cue
-        right.addWidget(QLabel("<b>5. CUES (LIVE)</b>"))
+        right.addWidget(QLabel("<b>5. CUES</b>"))
         mw.btn_rec = QPushButton("● REGISTRA CUE"); mw.btn_rec.clicked.connect(mw.toggle_rec)
         mw.btn_rec.setStyleSheet("color: #e74c3c; font-weight: bold; background-color: #222;")
         right.addWidget(mw.btn_rec)
-        
         mw.cue_list = QListWidget(); mw.cue_list.setFixedHeight(120)
         mw.cue_list.itemClicked.connect(lambda i: mw.playback.toggle_cue(i.text()))
         mw.cue_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
@@ -205,7 +221,6 @@ class UIBuilder:
         line = QFrame(); line.setFrameShape(QFrame.Shape.HLine); line.setStyleSheet("color: #444;")
         right.addWidget(line)
         
-        # Show Manager
         right.addWidget(QLabel("<b>6. SHOW MANAGER</b>"))
         mw.show_list_widget = QListWidget()
         mw.show_list_widget.itemDoubleClicked.connect(mw.play_show_item)
@@ -216,7 +231,6 @@ class UIBuilder:
         mw.btn_go = QPushButton("GO / NEXT ▶"); mw.btn_go.clicked.connect(mw.go_next_step)
         mw.btn_go.setStyleSheet("background-color: #d35400; color: white; font-weight: bold; font-size: 14px;")
         right.addWidget(mw.btn_go)
-        
         mw.btn_bo = QPushButton("MASTER BLACKOUT"); mw.btn_bo.clicked.connect(mw.action_blackout)
         mw.btn_bo.setStyleSheet("background-color: #6d0000; color: white; font-weight: bold;")
         right.addWidget(mw.btn_bo)

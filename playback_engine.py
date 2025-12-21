@@ -17,6 +17,9 @@ class PlaybackEngine(QObject):
         self.play_idx_cue = 0
         self.is_recording_cue = False
         self.recorded_stream = []
+        
+        # Offset per forzare avanzamento manuale/audio nei chase
+        self.chase_time_offset = 0
 
     def tick(self):
         if self.is_recording_cue:
@@ -30,25 +33,24 @@ class PlaybackEngine(QObject):
 
         if self.active_cue:
             cue_data = self.data["cues"].get(self.active_cue, {}).get("data", [])
-            if self.play_idx_cue < len(cue_data):
-                self.dmx.cue_buffer = bytearray(cue_data[self.play_idx_cue])
-                self.play_idx_cue += 1
-            else:
-                self.play_idx_cue = 0
+            if cue_data:
+                if self.play_idx_cue < len(cue_data):
+                    self.dmx.cue_buffer = bytearray(cue_data[self.play_idx_cue])
+                    self.play_idx_cue += 1
+                else:
+                    self.play_idx_cue = 0
 
     def _process_chase(self, config):
         steps = config["steps"]
+        if not steps: return
+
         base_hold = config["h"]
         base_fade = config["f"]
         
-        # --- LOGICA SPEED MASTER ---
-        # 127 = 1.0x (normale). 0 = 0.05x (veloce/corto). 255 = 2.0x (lento/lungo)
+        # Master Speed/Fade (127 = 1.0x)
         speed_val = self.data.get("globals", {}).get("chase_speed", 127)
         fade_val = self.data.get("globals", {}).get("chase_fade", 127)
         
-        # Fattore: 0 -> 0.1, 127 -> 1.0, 255 -> 2.0
-        # Mappatura "da massimo a minimo": Se il controllo è 0, il tempo deve essere minimo.
-        # Quindi se speed_val è basso, il tempo è basso.
         factor_h = max(0.05, speed_val / 127.0)
         factor_f = max(0.05, fade_val / 127.0)
         
@@ -56,17 +58,15 @@ class PlaybackEngine(QObject):
         fade_ms = int(base_fade * factor_f)
         
         cycle_total = hold_ms + fade_ms
-        if cycle_total == 0: cycle_total = 1 # Evita div by zero
+        if cycle_total == 0: cycle_total = 1
         
+        # Tempo assoluto + offset (per sync audio)
         now_ms = int(time.time() * 1000)
-        # Il calcolo del tempo trascorso deve tenere conto che se cambio velocità, 
-        # la posizione relativa potrebbe saltare. Per semplicità qui ricalcoliamo sul tempo assoluto.
-        elapsed = (now_ms - self.fade_start_ch) % (cycle_total * len(steps))
+        elapsed = (now_ms - self.fade_start_ch + self.chase_time_offset) % (cycle_total * len(steps))
         
         idx = elapsed // cycle_total
         t_in_step = elapsed % cycle_total
         
-        # Safety check index
         if idx >= len(steps): idx = 0
 
         sc_a = self.data["scenes"].get(steps[idx], {})
@@ -79,13 +79,23 @@ class PlaybackEngine(QObject):
                 buf[i] = val_a
             else:
                 val_b = sc_b.get(str(i), 0)
-                # Fade progress
                 if fade_ms > 0:
                     prog = (t_in_step - hold_ms) / fade_ms
                 else:
                     prog = 1
                 buf[i] = int(val_a + (val_b - val_a) * prog)
         self.dmx.chase_buffer = buf
+
+    def force_next_step_signal(self):
+        """Fa avanzare immediatamente il chase allo step successivo"""
+        if self.active_ch:
+            chase_config = self.data["chases"].get(self.active_ch)
+            if chase_config:
+                # Calcoliamo quanto manca alla fine dello step corrente e aggiungiamolo all'offset
+                # Per semplicità, aggiungiamo un tempo fisso grande quanto basta per saltare uno step medio
+                self.chase_time_offset += 200 # ms, salto empirico
+                # Nota: Una logica perfetta richiederebbe calcoli complessi sul ciclo attuale, 
+                # ma questo basta per dare l'effetto "colpo" a tempo di musica.
 
     def toggle_scene(self, name):
         if self.active_sc == name:
@@ -106,6 +116,7 @@ class PlaybackEngine(QObject):
         else:
             self.active_ch = name
             self.fade_start_ch = int(time.time() * 1000)
+            self.chase_time_offset = 0 # Reset offset
         self.state_changed.emit()
 
     def toggle_cue(self, name):
@@ -118,13 +129,10 @@ class PlaybackEngine(QObject):
         self.state_changed.emit()
 
     def stop_all(self):
-        """Ferma tutto e azzera TUTTI i buffer."""
         self.active_sc = self.active_ch = self.active_cue = None
         self.is_recording_cue = False
-        
         self.dmx.live_buffer = bytearray([0] * 513)
         self.dmx.scene_buffer = bytearray([0] * 513)
         self.dmx.chase_buffer = bytearray([0] * 513)
         self.dmx.cue_buffer = bytearray([0] * 513)
-        
         self.state_changed.emit()

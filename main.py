@@ -11,6 +11,7 @@ from PyQt6.QtCore import QTimer, Qt
 from dmx_engine import DMXController
 from playback_engine import PlaybackEngine
 from midi_manager import MidiManager
+from audio_engine import AudioReactor # NUOVO
 import data_manager
 from gui_components import ChaseCreatorDialog, FixtureCreatorDialog, FXGeneratorDialog
 from ui_builder import UIBuilder
@@ -34,6 +35,7 @@ class MainWindow(QMainWindow):
         self.dmx = DMXController()
         self.playback = PlaybackEngine(self.dmx, self.data_store)
         self.midi = MidiManager(self.playback, self.dmx, self.data_store)
+        self.audio = AudioReactor() # MOTORE AUDIO
         
         # 3. Segnali
         self.midi.selected_channels = self.selected_ch
@@ -41,21 +43,66 @@ class MainWindow(QMainWindow):
         self.midi.learn_status_changed.connect(self.on_learn_status_change)
         self.midi.request_ui_refresh.connect(self.update_ui_from_engine) 
         self.midi.new_midi_message.connect(self.update_midi_label)
+        
+        # Segnale Audio
+        self.audio.data_processed.connect(self.on_audio_data)
 
         # 4. Timer Show
         self.show_step_timer = QTimer()
         self.show_step_timer.setSingleShot(True)
         self.show_step_timer.timeout.connect(self.go_next_step)
 
-        # 5. UI Builder (Delegato)
+        # 5. UI Builder
         self.ui_builder = UIBuilder()
         self.ui_builder.setup_ui(self)
+        self.refresh_audio_devices() # Popola combo audio
         
         self.load_data()
 
         # 6. Loop
         self.timer_ui = QTimer(); self.timer_ui.timeout.connect(self.update_ui_frame); self.timer_ui.start(33)
         self.timer_engine = QTimer(); self.timer_engine.timeout.connect(self.playback.tick); self.timer_engine.start(40) 
+
+    # --- AUDIO LOGIC ---
+    def refresh_audio_devices(self):
+        devices = self.audio.get_devices()
+        self.audio_combo.clear()
+        for idx, name in devices:
+            self.audio_combo.addItem(f"{idx}: {name}", idx)
+
+    def toggle_audio_engine(self):
+        if self.btn_audio_start.isChecked():
+            idx = self.audio_combo.currentData()
+            if idx is not None:
+                self.audio.set_device(idx)
+                self.audio.start()
+                self.btn_audio_start.setText("STOP LISTENING")
+                self.btn_audio_start.setStyleSheet("background-color: #2ecc71; color: black; font-weight: bold;")
+        else:
+            self.audio.stop()
+            self.btn_audio_start.setText("START AUDIO LISTENING")
+            self.btn_audio_start.setStyleSheet("background-color: #2c3e50; color: #ccc;")
+
+    def on_gain_change(self, val):
+        self.audio.gain = val / 10.0
+
+    def on_audio_data(self, is_beat, vol, spectrum):
+        # UI Updates
+        self.prog_vol.setValue(vol)
+        if is_beat:
+            self.ind_beat.setStyleSheet("color: #e74c3c; font-size: 20px; font-weight: bold;")
+            QTimer.singleShot(100, lambda: self.ind_beat.setStyleSheet("color: #333; font-size: 18px;"))
+        
+        # LOGICA REATTIVA
+        # 1. Beat -> Chase
+        if is_beat and self.chk_beat_chase.isChecked():
+            self.playback.force_next_step_signal()
+        
+        # 2. Volume -> Dimmer
+        if self.chk_vol_dimmer.isChecked():
+            # Muove lo slider LIVE (Master Dimmer)
+            self.f_slider.setValue(vol)
+            self.fader_moved(vol)
 
     # --- CONNESSIONI ---
     def connect_serial(self):
@@ -81,7 +128,7 @@ class MainWindow(QMainWindow):
     def open_fx_wizard(self):
         selected_fixtures = [i.text() for i in self.f_list.selectedItems()]
         if not selected_fixtures:
-            QMessageBox.warning(self, "Stop", "Seleziona fixtures!")
+            QMessageBox.warning(self, "Stop", "Seleziona fixtures dalla lista!")
             return
         
         dlg = FXGeneratorDialog(len(selected_fixtures), self)
@@ -93,15 +140,28 @@ class MainWindow(QMainWindow):
             spread = dlg.slider_spread.value()
             name = dlg.name_input.text()
             
-            # Recupera dati fixtures
+            # Palette Colori
+            palette = []
+            pat_idx = dlg.combo_pattern.currentIndex()
+            if pat_idx == 0: c = dlg.selected_color; palette = [(c.red(), c.green(), c.blue())]
+            elif pat_idx == 1: palette = [(255, 0, 0), (0, 0, 255)] # R/B
+            elif pat_idx == 2: palette = [(255, 100, 0), (0, 200, 200)] # Org/Teal
+            elif pat_idx == 3: palette = [(255, 180, 0), (255, 255, 255)] # Amb/Wht
+            elif pat_idx == 4: palette = [(180, 0, 255), (0, 255, 0)] # Prp/Grn
+            elif pat_idx == 5: palette = [(255, 0, 0), (0, 255, 0)] # Xmas
+            elif pat_idx == 6: # Random
+                import random
+                palette = [(random.randint(0,255), random.randint(0,255), random.randint(0,255)) for _ in range(4)]
+
+            # Recupera fixtures
             fix_data_list = []
             for f in selected_fixtures:
                 fdata = self.data_store["fixtures"].get(f)
                 if isinstance(fdata, int): fdata = {"addr": fdata, "profile": ["Red", "Green", "Blue"]}
                 if fdata: fix_data_list.append(fdata)
             
-            # Genera step con la classe esterna
-            new_steps = FXUtils.generate_steps(fix_data_list, fx_type, steps, spread)
+            # Genera step
+            new_steps = FXUtils.generate_steps(fix_data_list, fx_type, steps, spread, palette)
             
             if new_steps:
                 import time
@@ -112,12 +172,16 @@ class MainWindow(QMainWindow):
                     self.data_store["scenes"][s_name] = data
                     step_names.append(s_name)
                 
-                self.data_store["chases"][name] = {"steps": step_names, "h": hold, "f": int(hold*0.8)}
+                # Se Blinder, fade deve essere veloce
+                fade_time = int(hold * 0.8)
+                if "Blinder" in fx_type: fade_time = 0 
+                
+                self.data_store["chases"][name] = {"steps": step_names, "h": hold, "f": fade_time}
                 self.ch_list.addItem(name)
                 self.save_data()
                 QMessageBox.information(self, "OK", "FX Creato!")
 
-    # --- LOGICA CORE ---
+    # --- CORE ---
     def action_blackout(self):
         self.show_step_timer.stop(); self.playback.stop_all()
         self.f_slider.setValue(0); self.f_input.setText("0"); self.f_label.setText("LIVE: 0 | 0%")
@@ -125,7 +189,6 @@ class MainWindow(QMainWindow):
 
     def update_ui_frame(self):
         mapped_ids = {ch for ids in self.data_store["map"].values() for ch in ids}
-        # Colora gli item nelle liste se sono mappati MIDI (Arancione) o normali
         mapped_remotes = []
         for val in self.data_store["rem"].values():
             if isinstance(val, list):
@@ -163,7 +226,7 @@ class MainWindow(QMainWindow):
         else: self.selected_ch.add(ch)
         self.cells[ch-1].update_view(self.dmx.output_frame[ch], ch in self.selected_ch, False, force=True)
 
-    # --- SPEED / FADE ---
+    # --- SPEED/FADE ---
     def on_speed_change(self, val):
         self.data_store["globals"]["chase_speed"] = val
         self.lbl_speed.setText(f"HOLD: {int(val/127*100)}%")
@@ -175,7 +238,7 @@ class MainWindow(QMainWindow):
         self.sl_speed.blockSignals(True); self.sl_speed.setValue(self.data_store["globals"]["chase_speed"]); self.on_speed_change(self.data_store["globals"]["chase_speed"]); self.sl_speed.blockSignals(False)
         self.sl_fade.blockSignals(True); self.sl_fade.setValue(self.data_store["globals"]["chase_fade"]); self.on_fade_change(self.data_store["globals"]["chase_fade"]); self.sl_fade.blockSignals(False)
 
-    # --- FIXTURE / GRUPPI ---
+    # --- FIXTURE/GRUPPI ---
     def create_fixture_action(self):
         dlg = FixtureCreatorDialog(self)
         if dlg.exec():
@@ -230,16 +293,13 @@ class MainWindow(QMainWindow):
 
     def select_group(self, name):
         self.f_list.clearSelection()
-        
-        # LOGICA TOGGLE
         if self.current_active_group == name: 
             self.selected_ch.clear(); self.current_active_group = None; self.g_list.clearSelection()
         else: 
             self.selected_ch = set(self.data_store["groups"].get(name, [])); self.current_active_group = name
-        
         for cell in self.cells: cell.update_view(self.dmx.output_frame[cell.ch], cell.ch in self.selected_ch, False, force=True)
 
-    # --- SCENE / CHASE / SHOW ---
+    # --- SAVE/LOAD/REC ---
     def save_scene_action(self):
         snap = {str(i): self.dmx.output_frame[i] for i in range(1, 513) if self.dmx.output_frame[i] > 0}
         name, ok = QInputDialog.getText(self, "Salva", "Nome Scena:")
@@ -331,13 +391,11 @@ class MainWindow(QMainWindow):
     def cell_context_menu(self, ch):
         m = QMenu(); m.addAction(f"CH {ch}").setEnabled(False)
         if len(self.selected_ch) > 1: m.addAction("Crea Gruppo").triggered.connect(self.create_group_action)
-        # Rimozione mappatura MIDI della cella
         mapped_keys = []
         for key, channels in self.data_store["map"].items():
             if ch in channels: mapped_keys.append(key)
         if mapped_keys:
             for k in mapped_keys: m.addAction(f"Rimuovi MIDI {k}").triggered.connect(lambda _, k=k: self._remove_midi_mapping(k, ch))
-        
         m.exec(self.cells[ch-1].mapToGlobal(self.cells[ch-1].rect().center()))
 
     def _remove_midi_mapping(self, midi_key, ch_to_remove):
@@ -350,38 +408,23 @@ class MainWindow(QMainWindow):
     def update_midi_label(self, t): self.lbl_midi_monitor.setText(t); self.lbl_midi_monitor.setStyleSheet("color:#2ecc71; border:1px solid #2ecc71;")
     def on_learn_status_change(self, l, t): self.btn_learn.setText("WAIT..." if l else "LEARN"); self.btn_learn.setStyleSheet(f"background: {'#c0392b' if l else '#2c3e50'}; color: white;")
     
-    # --- RESTORED VISUAL SELECTION FOR TOGGLE LOGIC ---
     def _update_list_visual_selection(self):
-        # Scenes
         for i in range(self.s_list.count()):
-            item = self.s_list.item(i)
-            is_active = (item.text() == self.playback.active_sc)
-            item.setSelected(is_active)
-            if not is_active: item.setSelected(False) # Force deselect if not active
-
-        # Chases
+            item = self.s_list.item(i); item.setSelected(item.text() == self.playback.active_sc)
         for i in range(self.ch_list.count()):
-            item = self.ch_list.item(i)
-            is_active = (item.text() == self.playback.active_ch)
-            item.setSelected(is_active)
-            if not is_active: item.setSelected(False)
-
-        # Cues
+            item = self.ch_list.item(i); item.setSelected(item.text() == self.playback.active_ch)
         for i in range(self.cue_list.count()):
-            item = self.cue_list.item(i)
-            is_active = (item.text() == self.playback.active_cue)
-            item.setSelected(is_active)
-            if not is_active: item.setSelected(False)
+            item = self.cue_list.item(i); item.setSelected(item.text() == self.playback.active_cue)
 
     def save_data(self): data_manager.save_studio_data(self.data_store)
     def load_data(self):
         d = data_manager.load_studio_data()
         if d: self.data_store.update(d); self.refresh_show_list_widget()
-        self.s_list.addItems(self.data_store["scenes"].keys())
-        self.ch_list.addItems(self.data_store["chases"].keys())
-        self.cue_list.addItems(self.data_store["cues"].keys())
-        self.g_list.addItems(self.data_store["groups"].keys())
-        self.f_list.addItems(self.data_store["fixtures"].keys())
+        self.s_list.addItems(self.data_store.get("scenes", {}).keys())
+        self.ch_list.addItems(self.data_store.get("chases", {}).keys())
+        self.cue_list.addItems(self.data_store.get("cues", {}).keys())
+        self.g_list.addItems(self.data_store.get("groups", {}).keys())
+        self.f_list.addItems(self.data_store.get("fixtures", {}).keys())
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
