@@ -1,7 +1,7 @@
 from PyQt6.QtWidgets import (QLabel, QFrame, QDialog, QVBoxLayout, 
                              QListWidget, QGridLayout, QLineEdit, QPushButton,
                              QHBoxLayout, QSpinBox, QTableWidget, QTableWidgetItem,
-                             QHeaderView, QComboBox, QMessageBox)
+                             QHeaderView, QComboBox, QMessageBox, QSlider)
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QIntValidator, QColor
 
@@ -91,7 +91,6 @@ class ChaseCreatorDialog(QDialog):
         self.btn_confirm.clicked.connect(self.accept)
         layout.addWidget(self.btn_confirm)
 
-# --- NUOVO DIALOGO AVANZATO PER FIXTURE ---
 class FixtureCreatorDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -188,3 +187,57 @@ class FixtureCreatorDialog(QDialog):
             combo = self.table.cellWidget(row, 1)
             profile.append(combo.currentText())
         return profile
+
+class FXGeneratorDialog(QDialog):
+    def __init__(self, fixtures_count, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("✨ Generatore Effetti Automatico")
+        self.setFixedWidth(400)
+        
+        layout = QVBoxLayout(self)
+        
+        layout.addWidget(QLabel(f"Generazione effetto su <b>{fixtures_count}</b> fixtures selezionate."))
+        layout.addSpacing(10)
+        
+        # 1. Tipo Effetto
+        layout.addWidget(QLabel("1. Scegli Tipo Effetto:"))
+        self.combo_fx = QComboBox()
+        self.combo_fx.addItems([
+            "🌈 Rainbow Wave (RGB)", 
+            "💡 Dimmer Sine Wave (Fade In/Out)", 
+            "⚡ Dimmer Chase (Odd/Even)", 
+            "🔴 Red/Blue Police (Strobe)", 
+            "🔦 Knight Rider (Scanner)"
+        ])
+        layout.addWidget(self.combo_fx)
+        
+        # 2. Parametri
+        layout.addSpacing(10)
+        layout.addWidget(QLabel("2. Parametri Generazione:"))
+        
+        grid = QGridLayout()
+        grid.addWidget(QLabel("Numero Step:"), 0, 0)
+        self.spin_steps = QSpinBox(); self.spin_steps.setRange(2, 50); self.spin_steps.setValue(10)
+        grid.addWidget(self.spin_steps, 0, 1)
+        
+        grid.addWidget(QLabel("Velocità (Hold ms):"), 1, 0)
+        self.spin_hold = QSpinBox(); self.spin_hold.setRange(20, 5000); self.spin_hold.setValue(100); self.spin_hold.setSingleStep(10)
+        grid.addWidget(self.spin_hold, 1, 1)
+        
+        grid.addWidget(QLabel("Spread (Sfasamento):"), 2, 0)
+        self.slider_spread = QSlider(Qt.Orientation.Horizontal); self.slider_spread.setRange(0, 100); self.slider_spread.setValue(100)
+        grid.addWidget(self.slider_spread, 2, 1)
+        
+        layout.addLayout(grid)
+        
+        layout.addSpacing(10)
+        layout.addWidget(QLabel("Nome Nuova Chase:"))
+        self.name_input = QLineEdit("New FX")
+        layout.addWidget(self.name_input)
+        
+        btns = QHBoxLayout()
+        btn_ok = QPushButton("GENERA CHASE"); btn_ok.clicked.connect(self.accept)
+        btn_ok.setStyleSheet("background-color: #d35400; color: white; font-weight: bold; padding: 5px;")
+        btn_cancel = QPushButton("ANNULLA"); btn_cancel.clicked.connect(self.reject)
+        btns.addWidget(btn_cancel); btns.addWidget(btn_ok)
+        layout.addLayout(btns)
