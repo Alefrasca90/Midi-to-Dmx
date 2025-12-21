@@ -4,9 +4,10 @@ import mido
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QComboBox, QPushButton, QVBoxLayout, 
     QHBoxLayout, QWidget, QLabel, QScrollArea, QGridLayout, QMenu, 
-    QListWidget, QInputDialog, QLineEdit, QMessageBox, QSlider, QFrame, QTabWidget
+    QListWidget, QInputDialog, QLineEdit, QMessageBox, QSlider, QFrame, QTabWidget,
+    QColorDialog, QAbstractItemView
 )
-from PyQt6.QtGui import QColor, QIntValidator, QFont
+from PyQt6.QtGui import QColor, QIntValidator, QFont, QAction
 from PyQt6.QtCore import QTimer, Qt
 
 # IMPORT MODULI
@@ -14,7 +15,7 @@ from dmx_engine import DMXController
 from playback_engine import PlaybackEngine
 from midi_manager import MidiManager
 import data_manager
-from gui_components import DMXCell, ChaseCreatorDialog, GRID_COLUMNS
+from gui_components import DMXCell, ChaseCreatorDialog, FixtureCreatorDialog, GRID_COLUMNS
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -23,9 +24,13 @@ class MainWindow(QMainWindow):
         # 1. Dati
         self.data_store = {
             "scenes": {}, "chases": {}, "cues": {}, 
-            "show": [], "rem": {}, "map": {}
+            "show": [], "rem": {}, "map": {}, "groups": {},
+            "fixtures": {}, 
+            "globals": {"chase_speed": 127, "chase_fade": 127} 
         }
         self.selected_ch = set()
+        self.current_active_group = None 
+        # Nota: self.current_active_fixture è rimosso, usiamo la selezione multipla della lista
 
         # 2. Motori
         self.dmx = DMXController()
@@ -36,7 +41,8 @@ class MainWindow(QMainWindow):
         self.midi.selected_channels = self.selected_ch
         self.playback.state_changed.connect(self._update_list_visual_selection)
         self.midi.learn_status_changed.connect(self.on_learn_status_change)
-        self.midi.request_ui_refresh.connect(lambda: None) 
+        self.midi.request_ui_refresh.connect(self.update_ui_from_engine) 
+        self.midi.new_midi_message.connect(self.update_midi_label)
 
         # 4. Timer Automazione Show
         self.show_step_timer = QTimer()
@@ -57,7 +63,7 @@ class MainWindow(QMainWindow):
         self.timer_engine.start(40) 
 
     def init_interface(self):
-        self.setWindowTitle("MIDI-DMX Pro v.11.0 - ArtNet Enabled")
+        self.setWindowTitle("MIDI-DMX Pro v.15.0 - Multi Fixture Selection")
         
         self.setStyleSheet("""
             QMainWindow { background-color: #0f0f0f; }
@@ -80,6 +86,8 @@ class MainWindow(QMainWindow):
             QTabWidget::pane { border: 1px solid #333; }
             QTabBar::tab { background: #222; color: #888; padding: 5px; }
             QTabBar::tab:selected { background: #333; color: white; border-bottom: 2px solid #3498db; }
+            QMenu { background-color: #222; color: white; border: 1px solid #555; }
+            QMenu::item:selected { background-color: #3498db; }
         """)
         
         central = QWidget()
@@ -121,12 +129,19 @@ class MainWindow(QMainWindow):
         
         left.addWidget(self.hw_tabs)
         
-        # MIDI Setup (Sempre visibile)
+        # MIDI Setup
         midi_box = QHBoxLayout()
         self.midi_combo = QComboBox(); self.midi_combo.addItems(mido.get_input_names())
         btn_midi = QPushButton("OK"); btn_midi.setFixedWidth(40); btn_midi.clicked.connect(self.connect_midi)
         midi_box.addWidget(QLabel("MIDI IN:")); midi_box.addWidget(self.midi_combo); midi_box.addWidget(btn_midi)
-        left.addLayout(midi_box); left.addSpacing(15)
+        left.addLayout(midi_box)
+        
+        self.lbl_midi_monitor = QLabel("DISCONNECTED")
+        self.lbl_midi_monitor.setStyleSheet("color: #666; font-size: 11px; border: 1px solid #333; padding: 2px;")
+        self.lbl_midi_monitor.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        left.addWidget(self.lbl_midi_monitor)
+        
+        left.addSpacing(15)
         
         # Live
         left.addWidget(QLabel("<b>2. LIVE CONTROL</b>"))
@@ -151,20 +166,75 @@ class MainWindow(QMainWindow):
         self.btn_learn = QPushButton("LEARN MIDI CHANNELS")
         self.btn_learn.setFixedHeight(35)
         self.btn_learn.clicked.connect(lambda: self.midi.toggle_learn("chans"))
-        left.addWidget(self.btn_learn); left.addSpacing(15)
-
-        # Scene
-        left.addWidget(QLabel("<b>3. SCENE STATICHE</b>"))
-        btn_save_sc = QPushButton("SALVA SCENA"); btn_save_sc.setFixedHeight(30)
-        btn_save_sc.clicked.connect(self.save_scene_action)
-        btn_save_sc.setStyleSheet("background-color: #1e3d24; border-color: #2ecc71; color: #ccc;")
-        left.addWidget(btn_save_sc)
+        left.addWidget(self.btn_learn)
         
+        self.btn_reset_map = QPushButton("ELIMINA TUTTE LE MAPPATURE MIDI")
+        self.btn_reset_map.setFixedHeight(25)
+        self.btn_reset_map.setStyleSheet("background-color: #c0392b; color: white; border: 1px solid #922b21; margin-top: 5px;")
+        self.btn_reset_map.clicked.connect(self.reset_all_midi_channels)
+        left.addWidget(self.btn_reset_map)
+        
+        left.addSpacing(15)
+
+        # --- RISORSE ---
+        left.addWidget(QLabel("<b>3. RISORSE</b>"))
+        
+        self.sg_tabs = QTabWidget()
+        self.sg_tabs.setStyleSheet("QTabWidget::pane { border: 1px solid #333; }")
+        
+        # Tab SCENE
+        tab_sc = QWidget()
+        l_sc = QVBoxLayout(tab_sc); l_sc.setContentsMargins(2,2,2,2)
+        btn_save_sc = QPushButton("SALVA SCENA")
+        btn_save_sc.setStyleSheet("background-color: #1e3d24; color: #ccc; border: 1px solid #2ecc71;")
+        btn_save_sc.clicked.connect(self.save_scene_action)
         self.s_list = QListWidget()
         self.s_list.itemClicked.connect(lambda i: self.playback.toggle_scene(i.text()))
         self.s_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.s_list.customContextMenuRequested.connect(lambda p: self.show_context_menu(self.s_list, p, "sc"))
-        left.addWidget(self.s_list)
+        l_sc.addWidget(btn_save_sc); l_sc.addWidget(self.s_list)
+        self.sg_tabs.addTab(tab_sc, "SCENE")
+        
+        # Tab GRUPPI
+        tab_gr = QWidget()
+        l_gr = QVBoxLayout(tab_gr); l_gr.setContentsMargins(2,2,2,2)
+        btn_mk_gr = QPushButton("CREA GRUPPO")
+        btn_mk_gr.setStyleSheet("background-color: #2c3e50; color: #3498db; border: 1px solid #3498db;")
+        btn_mk_gr.clicked.connect(self.create_group_action)
+        self.g_list = QListWidget()
+        self.g_list.itemClicked.connect(lambda i: self.select_group(i.text()))
+        self.g_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.g_list.customContextMenuRequested.connect(lambda p: self.show_context_menu(self.g_list, p, "grp"))
+        l_gr.addWidget(btn_mk_gr); l_gr.addWidget(self.g_list)
+        self.sg_tabs.addTab(tab_gr, "GRUPPI")
+
+        # Tab FIXTURES (MULTI SELECTION)
+        tab_fix = QWidget()
+        l_fix = QVBoxLayout(tab_fix); l_fix.setContentsMargins(2,2,2,2)
+        
+        btn_new_fix = QPushButton("NUOVA FIXTURE")
+        btn_new_fix.clicked.connect(self.create_fixture_action)
+        
+        self.btn_color_pick = QPushButton("🎨 PICK COLOR (MULTI)")
+        self.btn_color_pick.setStyleSheet("background-color: #8e44ad; color: white; font-weight: bold;")
+        self.btn_color_pick.clicked.connect(self.open_live_color_picker)
+        self.btn_color_pick.setEnabled(False) 
+
+        self.f_list = QListWidget()
+        # ABILITIAMO SELEZIONE MULTIPLA (Click per toggle)
+        self.f_list.setSelectionMode(QListWidget.SelectionMode.MultiSelection)
+        # Colleghiamo al cambio di selezione invece che al click singolo
+        self.f_list.itemSelectionChanged.connect(self.on_fixture_selection_change)
+        
+        self.f_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.f_list.customContextMenuRequested.connect(lambda p: self.show_context_menu(self.f_list, p, "fix"))
+
+        l_fix.addWidget(btn_new_fix)
+        l_fix.addWidget(self.btn_color_pick)
+        l_fix.addWidget(self.f_list)
+        self.sg_tabs.addTab(tab_fix, "FIXTURES")
+        
+        left.addWidget(self.sg_tabs)
         
         # --- CENTER PANEL ---
         self.cells = []
@@ -174,6 +244,7 @@ class MainWindow(QMainWindow):
         for i in range(512):
             c = DMXCell(i + 1)
             c.clicked.connect(self.toggle_cell)
+            c.right_clicked.connect(self.cell_context_menu)
             grid.addWidget(c, i // GRID_COLUMNS, i % GRID_COLUMNS)
             self.cells.append(c)
         scroll = QScrollArea(); scroll.setWidget(grid_w); scroll.setWidgetResizable(True); scroll.setStyleSheet("border: none;")
@@ -187,11 +258,32 @@ class MainWindow(QMainWindow):
         btn_mk_ch = QPushButton("CREA CHASE STEP"); btn_mk_ch.setFixedHeight(30)
         btn_mk_ch.clicked.connect(self.create_chase_action)
         right.addWidget(btn_mk_ch)
-        self.ch_list = QListWidget(); self.ch_list.setFixedHeight(120)
+        self.ch_list = QListWidget(); self.ch_list.setFixedHeight(90)
         self.ch_list.itemClicked.connect(lambda i: self.playback.toggle_chase(i.text()))
         self.ch_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.ch_list.customContextMenuRequested.connect(lambda p: self.show_context_menu(self.ch_list, p, "ch"))
         right.addWidget(self.ch_list)
+
+        # Slider Speed/Fade
+        speed_box = QWidget(); speed_box.setStyleSheet("background-color: #1a1a1a; border-radius: 4px; margin-top: 5px;")
+        l_spd = QVBoxLayout(speed_box); l_spd.setSpacing(2); l_spd.setContentsMargins(5,5,5,5)
+        
+        self.lbl_speed = QLabel("HOLD TIME %: 100%")
+        l_spd.addWidget(self.lbl_speed)
+        self.sl_speed = QSlider(Qt.Orientation.Horizontal); self.sl_speed.setRange(0, 255); self.sl_speed.setValue(127)
+        self.sl_speed.valueChanged.connect(self.on_speed_change)
+        self.sl_speed.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.sl_speed.customContextMenuRequested.connect(lambda p: self.show_slider_context(p, "chase_speed"))
+        l_spd.addWidget(self.sl_speed)
+        
+        self.lbl_fade = QLabel("FADE TIME %: 100%")
+        l_spd.addWidget(self.lbl_fade)
+        self.sl_fade = QSlider(Qt.Orientation.Horizontal); self.sl_fade.setRange(0, 255); self.sl_fade.setValue(127)
+        self.sl_fade.valueChanged.connect(self.on_fade_change)
+        self.sl_fade.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.sl_fade.customContextMenuRequested.connect(lambda p: self.show_slider_context(p, "chase_fade"))
+        l_spd.addWidget(self.sl_fade)
+        right.addWidget(speed_box)
 
         # Cue
         right.addWidget(QLabel("<b>5. CUES (LIVE)</b>"))
@@ -199,7 +291,7 @@ class MainWindow(QMainWindow):
         self.btn_rec.setStyleSheet("color: #e74c3c; font-weight: bold; background-color: #222;")
         self.btn_rec.clicked.connect(self.toggle_rec)
         right.addWidget(self.btn_rec)
-        self.cue_list = QListWidget(); self.cue_list.setFixedHeight(120)
+        self.cue_list = QListWidget(); self.cue_list.setFixedHeight(100)
         self.cue_list.itemClicked.connect(lambda i: self.playback.toggle_cue(i.text()))
         self.cue_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.cue_list.customContextMenuRequested.connect(lambda p: self.show_context_menu(self.cue_list, p, "cue"))
@@ -245,8 +337,17 @@ class MainWindow(QMainWindow):
             self.setWindowTitle("MIDI-DMX Pro [MODE: ART-NET]")
 
     def connect_midi(self):
-        if self.midi.open_port(self.midi_combo.currentText()):
-            pass # Feedback opzionale
+        port_name = self.midi_combo.currentText()
+        if not port_name: return
+        error_msg = self.midi.open_port(port_name)
+        if error_msg is None:
+            self.lbl_midi_monitor.setText(f"OK: {port_name[:15]}...")
+            self.lbl_midi_monitor.setStyleSheet("color: #2ecc71; border: 1px solid #2ecc71; font-weight: bold;")
+            QMessageBox.information(self, "MIDI Connesso", f"Dispositivo collegato correttamente:\n{port_name}")
+        else:
+            self.lbl_midi_monitor.setText("ERROR")
+            self.lbl_midi_monitor.setStyleSheet("color: #e74c3c; border: 1px solid #e74c3c; font-weight: bold;")
+            QMessageBox.critical(self, "Errore MIDI", f"Impossibile aprire il dispositivo!\n\nErrore: {error_msg}\n\nPossibili cause:\n1. Il dispositivo è usato da un altro programma (Chrome, Ableton, ecc.)\n2. Driver mancanti.\n3. Libreria 'python-rtmidi' non installata.")
 
     # --- ACTIONS & BLACKOUT ---
     def action_blackout(self):
@@ -261,7 +362,43 @@ class MainWindow(QMainWindow):
         self.show_list_widget.clearSelection()
         self.show_list_widget.setCurrentRow(-1)
 
-    # --- SHOW MANAGER LOGIC ---
+    # --- SPEED / FADE ---
+    def on_speed_change(self, val):
+        self.data_store["globals"]["chase_speed"] = val
+        pct = int((val / 127) * 100)
+        self.lbl_speed.setText(f"HOLD TIME %: {pct}%")
+
+    def on_fade_change(self, val):
+        self.data_store["globals"]["chase_fade"] = val
+        pct = int((val / 127) * 100)
+        self.lbl_fade.setText(f"FADE TIME %: {pct}%")
+
+    def show_slider_context(self, pos, target_key):
+        menu = QMenu()
+        act_learn = menu.addAction("Mappa a Controller MIDI")
+        target_str = f"global:{target_key}"
+        mapped_key = None
+        for k, v in self.data_store["rem"].items():
+            if isinstance(v, list):
+                if target_str in v: mapped_key = k; break
+            elif v == target_str: mapped_key = k; break
+        
+        if mapped_key: act_unmap = menu.addAction(f"❌ Rimuovi MIDI ({mapped_key})")
+        res = menu.exec(self.sender().mapToGlobal(pos))
+        if res == act_learn: self.midi.toggle_learn(target_str)
+        elif mapped_key and res == act_unmap:
+            val = self.data_store["rem"][mapped_key]
+            if isinstance(val, list):
+                if target_str in val: val.remove(target_str)
+                if not val: del self.data_store["rem"][mapped_key]
+            else: del self.data_store["rem"][mapped_key]
+            self.save_data(); QMessageBox.information(self, "Info", "Mapping rimosso")
+
+    def update_ui_from_engine(self):
+        self.sl_speed.blockSignals(True); self.sl_speed.setValue(self.data_store["globals"]["chase_speed"]); self.on_speed_change(self.data_store["globals"]["chase_speed"]); self.sl_speed.blockSignals(False)
+        self.sl_fade.blockSignals(True); self.sl_fade.setValue(self.data_store["globals"]["chase_fade"]); self.on_fade_change(self.data_store["globals"]["chase_fade"]); self.sl_fade.blockSignals(False)
+
+    # --- SHOW MANAGER ---
     def add_to_show(self, type_key, name):
         duration = 0
         if type_key == "cue":
@@ -269,39 +406,29 @@ class MainWindow(QMainWindow):
             duration = len(cue_data) * 40
             obj = {"type": type_key, "name": name, "duration": duration}
             self.data_store["show"].append(obj)
-            self.refresh_show_list_widget()
-            self.save_data()
+            self.refresh_show_list_widget(); self.save_data()
             QMessageBox.information(self, "Cue Aggiunta", f"Cue aggiunta con durata fissa: {duration/1000}s")
         else:
             duration, ok = QInputDialog.getInt(self, "Durata Step", f"Inserisci durata in ms per '{name}':\n(0 = Manuale)", value=0, min=0, max=3600000)
             if ok:
                 obj = {"type": type_key, "name": name, "duration": duration}
                 self.data_store["show"].append(obj)
-                self.refresh_show_list_widget()
-                self.save_data()
+                self.refresh_show_list_widget(); self.save_data()
 
     def play_show_item(self, item):
         self.show_step_timer.stop()
         row_idx = self.show_list_widget.row(item)
         entry = self.data_store["show"][row_idx]
-        
         if isinstance(entry, str): return 
-
-        t_type = entry.get("type")
-        name = entry.get("name")
-        duration = entry.get("duration", 0)
+        t_type = entry.get("type"); name = entry.get("name"); duration = entry.get("duration", 0)
         
         if t_type == "sc": self.playback.toggle_scene(name)
         elif t_type == "ch": self.playback.toggle_chase(name)
         elif t_type == "cue": self.playback.toggle_cue(name)
         
         self._update_list_visual_selection()
-        
-        if duration > 0:
-            self.btn_go.setText(f"AUTO NEXT ({duration/1000}s) ▶")
-            self.show_step_timer.start(duration)
-        else:
-            self.btn_go.setText("GO / NEXT ▶")
+        if duration > 0: self.btn_go.setText(f"AUTO NEXT ({duration/1000}s) ▶"); self.show_step_timer.start(duration)
+        else: self.btn_go.setText("GO / NEXT ▶")
 
     def go_next_step(self):
         if not self.data_store["show"]: return
@@ -311,29 +438,21 @@ class MainWindow(QMainWindow):
         self.play_show_item(self.show_list_widget.item(next_row))
 
     def show_manager_context_menu(self, pos):
-        item = self.show_list_widget.itemAt(pos)
+        item = self.show_list_widget.itemAt(pos); 
         if not item: return
-        row = self.show_list_widget.row(item)
-        entry = self.data_store["show"][row]
-        
+        row = self.show_list_widget.row(item); entry = self.data_store["show"][row]
         if isinstance(entry, str):
             t, n = entry.split(":", 1); entry = {"type": t, "name": n, "duration": 0}
             self.data_store["show"][row] = entry
-
-        menu = QMenu()
-        act_time = menu.addAction("Modifica Durata Step")
-        act_del = menu.addAction("Rimuovi da Show")
+        menu = QMenu(); act_time = menu.addAction("Modifica Durata Step"); act_del = menu.addAction("Rimuovi da Show")
         res = menu.exec(self.show_list_widget.mapToGlobal(pos))
-        
-        if res == act_del:
-            self.data_store["show"].pop(row); self.refresh_show_list_widget(); self.save_data()
+        if res == act_del: self.data_store["show"].pop(row); self.refresh_show_list_widget(); self.save_data()
         elif res == act_time:
             if entry["type"] == "cue": QMessageBox.warning(self, "Block", "Durata Cue fissa.")
             else:
                 curr_dur = entry.get("duration", 0)
                 new_dur, ok = QInputDialog.getInt(self, "Modifica", "Nuova durata ms:", value=curr_dur, min=0, max=3600000)
-                if ok:
-                    entry["duration"] = new_dur; self.data_store["show"][row] = entry; self.refresh_show_list_widget(); self.save_data()
+                if ok: entry["duration"] = new_dur; self.data_store["show"][row] = entry; self.refresh_show_list_widget(); self.save_data()
 
     def refresh_show_list_widget(self):
         self.show_list_widget.clear()
@@ -341,34 +460,179 @@ class MainWindow(QMainWindow):
             if isinstance(entry, str):
                 try: t, n = entry.split(":", 1); entry = {"type": t, "name": n, "duration": 0}
                 except: continue
-            t_type = entry.get("type", "?").upper()
-            name = entry.get("name", "Unknown")
-            dur = entry.get("duration", 0)
+            t_type = entry.get("type", "?").upper(); name = entry.get("name", "Unknown"); dur = entry.get("duration", 0)
             time_str = f"FIXED ({dur/1000}s)" if t_type == "CUE" else ("MANUAL" if dur == 0 else f"{dur/1000}s")
             self.show_list_widget.addItem(f"{i+1}. [{t_type}] {name}  -- ⏱ {time_str}")
 
-    # --- UPDATE UI ---
     def update_ui_frame(self):
         mapped_ids = {ch for ids in self.data_store["map"].values() for ch in ids}
         mapped_remote_names = []
         for val in self.data_store["rem"].values():
-            if ":" in val: mapped_remote_names.append(val.split(":", 1)[1])
+            if isinstance(val, list):
+                for item in val:
+                     if ":" in item: mapped_remote_names.append(item.split(":", 1)[1])
+            elif ":" in val: mapped_remote_names.append(val.split(":", 1)[1])
 
         for i, cell in enumerate(self.cells):
             ch_num = i + 1; val = self.dmx.output_frame[ch_num]
             cell.update_view(val, ch_num in self.selected_ch, ch_num in mapped_ids)
 
-        for lst in [self.s_list, self.ch_list, self.cue_list]:
+        for lst in [self.s_list, self.ch_list, self.cue_list, self.g_list, self.f_list]:
             for row in range(lst.count()):
                 item = lst.item(row)
                 target_color = QColor("#e67e22") if item.text() in mapped_remote_names else QColor("#ddd")
                 if item.foreground().color() != target_color: item.setForeground(target_color)
 
-    # --- EVENTS ---
+    # --- CELL EVENTS ---
     def toggle_cell(self, ch):
+        if self.current_active_group: self.current_active_group = None; self.g_list.clearSelection()
+        
+        # Se tocchiamo la griglia, deselezioniamo la lista fixture per non creare confusione
+        if self.f_list.selectedItems():
+            self.f_list.clearSelection()
+            self.btn_color_pick.setEnabled(False)
+
         if ch in self.selected_ch: self.selected_ch.remove(ch)
         else: self.selected_ch.add(ch)
         self.cells[ch-1].update_view(self.dmx.output_frame[ch], ch in self.selected_ch, False, force=True)
+    
+    # --- GRUPPI ---
+    def create_group_action(self):
+        if not self.selected_ch: QMessageBox.warning(self, "Info", "Seleziona canali."); return
+        name, ok = QInputDialog.getText(self, "Nuovo Gruppo", "Nome:")
+        if ok and name: self.data_store["groups"][name] = list(self.selected_ch); self.g_list.addItem(name); self.save_data()
+
+    def select_group(self, name):
+        # Deseleziona fixture
+        self.f_list.clearSelection()
+        
+        if self.current_active_group == name:
+            self.selected_ch.clear(); self.current_active_group = None; self.g_list.clearSelection()
+        else:
+            channels = self.data_store["groups"].get(name, []); self.selected_ch = set(channels); self.current_active_group = name
+        
+        for cell in self.cells:
+            is_sel = cell.ch in self.selected_ch
+            cell.update_view(self.dmx.output_frame[cell.ch], is_sel, False, force=True)
+
+    # --- FIXTURES (MULTI SELECTION LOGIC) ---
+    def create_fixture_action(self):
+        dlg = FixtureCreatorDialog(self)
+        if dlg.exec():
+            name = dlg.name_input.text()
+            addr = dlg.addr_spin.value()
+            profile = dlg.get_profile()
+            if name and profile:
+                self.data_store["fixtures"][name] = {"addr": addr, "profile": profile}
+                self.f_list.addItem(name); self.save_data()
+                QMessageBox.information(self, "OK", f"Fixture '{name}' creata.")
+
+    def on_fixture_selection_change(self):
+        # 1. Se seleziono fixture, resetto gruppi
+        if self.current_active_group:
+            self.current_active_group = None
+            self.g_list.clearSelection()
+
+        # 2. Ricalcolo TUTTI i canali selezionati in base alle fixture selezionate
+        self.selected_ch = set()
+        selected_items = self.f_list.selectedItems()
+        has_any_color = False
+
+        for item in selected_items:
+            name = item.text()
+            fix_data = self.data_store["fixtures"].get(name)
+            if not fix_data: continue
+            
+            # Compatibilità
+            if isinstance(fix_data, int):
+                start = fix_data; profile = ["Red", "Green", "Blue"]
+            else:
+                start = fix_data["addr"]; profile = fix_data["profile"]
+            
+            for i, p in enumerate(profile):
+                self.selected_ch.add(start + i)
+                if p in ["Red", "Green", "Blue", "Dimmer"]:
+                    has_any_color = True
+        
+        # 3. Aggiorno stato pulsante Color Picker
+        self.btn_color_pick.setEnabled(has_any_color and len(selected_items) > 0)
+        
+        # 4. Aggiorno Griglia
+        for cell in self.cells:
+            is_sel = cell.ch in self.selected_ch
+            cell.update_view(self.dmx.output_frame[cell.ch], is_sel, False, force=True)
+
+    def open_live_color_picker(self):
+        if not self.f_list.selectedItems(): return
+        color_dlg = QColorDialog(self)
+        color_dlg.setOption(QColorDialog.ColorDialogOption.NoButtons)
+        color_dlg.currentColorChanged.connect(self.apply_live_color)
+        color_dlg.exec()
+
+    def apply_live_color(self, color):
+        # Applica il colore a TUTTE le fixture selezionate
+        selected_items = self.f_list.selectedItems()
+        if not selected_items: return
+        
+        r, g, b = color.red(), color.green(), color.blue()
+        
+        for item in selected_items:
+            name = item.text()
+            fix_data = self.data_store["fixtures"].get(name)
+            if not fix_data: continue
+            
+            if isinstance(fix_data, int):
+                start = fix_data; profile = ["Red", "Green", "Blue"]
+            else:
+                start = fix_data["addr"]; profile = fix_data["profile"]
+            
+            for i, ch_type in enumerate(profile):
+                val = -1
+                if ch_type == "Red": val = r
+                elif ch_type == "Green": val = g
+                elif ch_type == "Blue": val = b
+                elif ch_type == "Dimmer": val = 255 # Auto-open dimmer
+                elif ch_type == "White": val = 0    # Reset white on RGB pick
+                
+                if val >= 0:
+                    ch_idx = start + i
+                    if ch_idx <= 512:
+                        self.dmx.live_buffer[ch_idx] = val
+                        self.cells[ch_idx-1].update_view(val, True, False, force=True)
+
+    # --- RESET MAP ---
+    def reset_all_midi_channels(self):
+        reply = QMessageBox.question(self, "Conferma", "Reset totale MIDI map?", QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        if reply == QMessageBox.StandardButton.Yes: self.data_store["map"].clear(); self.save_data()
+
+    # --- CELL CONTEXT ---
+    def cell_context_menu(self, ch):
+        menu = QMenu(self)
+        menu.addAction(QAction(f"CANALE {ch}", self)).setEnabled(False); menu.addSeparator()
+
+        mapped_keys = []
+        for key, channels in self.data_store["map"].items():
+            if ch in channels: mapped_keys.append(key)
+        
+        if mapped_keys:
+            menu.addAction(QAction("Mappato su:", self)).setEnabled(False)
+            for k in mapped_keys:
+                act = menu.addAction(f"❌ Rimuovi MIDI: {k}")
+                act.triggered.connect(lambda _, k=k: self._remove_midi_mapping(k, ch))
+        else: menu.addAction("Nessun MIDI assegnato").setEnabled(False)
+        
+        menu.addSeparator()
+        if len(self.selected_ch) > 1 and ch in self.selected_ch:
+             menu.addAction(f"Crea Gruppo da {len(self.selected_ch)} ch").triggered.connect(self.create_group_action)
+        
+        menu.exec(self.cells[ch-1].mapToGlobal(self.cells[ch-1].rect().center()))
+
+    def _remove_midi_mapping(self, midi_key, ch_to_remove):
+        if midi_key in self.data_store["map"]:
+            if ch_to_remove in self.data_store["map"][midi_key]:
+                self.data_store["map"][midi_key].remove(ch_to_remove)
+                if not self.data_store["map"][midi_key]: del self.data_store["map"][midi_key]
+                self.save_data(); QMessageBox.information(self, "Info", "Rimosso")
 
     def fader_moved(self, val):
         self.f_label.setText(f"LIVE: {val} | {int(val/2.55)}%")
@@ -385,24 +649,18 @@ class MainWindow(QMainWindow):
         except ValueError: pass
 
     def on_learn_status_change(self, is_learning, target):
-        if is_learning:
-            self.btn_learn.setText("WAITING MIDI...")
-            self.btn_learn.setStyleSheet("background-color: #c0392b; color: white; font-weight: bold;")
-        else:
-            self.btn_learn.setText("LEARN MIDI CHANNELS")
-            self.btn_learn.setStyleSheet("background-color: #2c3e50; color: #ccc;")
-            self.save_data()
+        if is_learning: self.btn_learn.setText("WAITING MIDI..."); self.btn_learn.setStyleSheet("background-color: #c0392b; color: white; font-weight: bold;")
+        else: self.btn_learn.setText("LEARN MIDI CHANNELS"); self.btn_learn.setStyleSheet("background-color: #2c3e50; color: #ccc;"); self.save_data()
+    
+    def update_midi_label(self, text):
+        self.lbl_midi_monitor.setText(text); self.lbl_midi_monitor.setStyleSheet("color: #2ecc71; font-size: 11px; border: 1px solid #2ecc71; padding: 2px;")
 
     def toggle_rec(self):
         if self.playback.is_recording_cue:
-            self.playback.is_recording_cue = False
-            self.btn_rec.setText("● REGISTRA CUE"); self.btn_rec.setStyleSheet("color: #e74c3c; background-color: #222; font-weight: bold;")
+            self.playback.is_recording_cue = False; self.btn_rec.setText("● REGISTRA CUE"); self.btn_rec.setStyleSheet("color: #e74c3c; background-color: #222; font-weight: bold;")
             name, ok = QInputDialog.getText(self, "Salva", "Nome Cue:")
-            if ok and name:
-                self.data_store["cues"][name] = {"data": self.playback.recorded_stream}; self.cue_list.addItem(name); self.save_data()
-        else:
-            self.playback.recorded_stream = []; self.playback.is_recording_cue = True
-            self.btn_rec.setText("STOP REC"); self.btn_rec.setStyleSheet("background-color: #c0392b; color: #fff; font-weight: bold;")
+            if ok and name: self.data_store["cues"][name] = {"data": self.playback.recorded_stream}; self.cue_list.addItem(name); self.save_data()
+        else: self.playback.recorded_stream = []; self.playback.is_recording_cue = True; self.btn_rec.setText("STOP REC"); self.btn_rec.setStyleSheet("background-color: #c0392b; color: #fff; font-weight: bold;")
 
     def _update_list_visual_selection(self):
         for i in range(self.s_list.count()): self.s_list.item(i).setSelected(self.s_list.item(i).text() == self.playback.active_sc)
@@ -410,15 +668,36 @@ class MainWindow(QMainWindow):
         for i in range(self.cue_list.count()): self.cue_list.item(i).setSelected(self.cue_list.item(i).text() == self.playback.active_cue)
 
     def show_context_menu(self, widget, pos, type_key):
-        item = widget.itemAt(pos)
+        item = widget.itemAt(pos); 
         if not item: return
-        menu = QMenu(); act_learn = menu.addAction("Mappa a Pulsante MIDI"); act_show = menu.addAction("Aggiungi a Show Manager"); act_del = menu.addAction("Elimina Elemento")
+        menu = QMenu(); act_learn = menu.addAction("Mappa a Pulsante MIDI")
+        
+        target_str = f"{type_key}:{item.text()}"; mapped_key = None
+        for k, v in self.data_store["rem"].items():
+            if isinstance(v, list):
+                if target_str in v: mapped_key = k; break
+            elif v == target_str: mapped_key = k; break
+        
+        if mapped_key: act_unmap = menu.addAction(f"❌ Rimuovi Trigger MIDI ({mapped_key})")
+        menu.addSeparator()
+        if type_key not in ["grp", "fix"]: act_show = menu.addAction("Aggiungi a Show Manager")
+        act_del = menu.addAction("Elimina Elemento")
+        
         res = menu.exec(widget.mapToGlobal(pos))
-        if res == act_learn: self.midi.toggle_learn(f"{type_key}:{item.text()}")
-        elif res == act_show: self.add_to_show(type_key, item.text())
+        if res == act_learn: self.midi.toggle_learn(target_str)
+        elif mapped_key and res == act_unmap:
+            val = self.data_store["rem"][mapped_key]
+            if isinstance(val, list):
+                if target_str in val: val.remove(target_str)
+                if not val: del self.data_store["rem"][mapped_key]
+            else: del self.data_store["rem"][mapped_key]
+            self.save_data(); QMessageBox.information(self, "Info", "Trigger MIDI Rimosso")
+        elif type_key not in ["grp", "fix"] and res == act_show: self.add_to_show(type_key, item.text())
         elif res == act_del: 
-            widget.takeItem(widget.row(item)); key_map = {"sc": "scenes", "ch": "chases", "cue": "cues"}
-            self.data_store[key_map[type_key]].pop(item.text(), None); self.save_data()
+            widget.takeItem(widget.row(item))
+            key_map = {"sc": "scenes", "ch": "chases", "cue": "cues", "grp": "groups", "fix": "fixtures"}
+            self.data_store[key_map[type_key]].pop(item.text(), None)
+            self.save_data()
 
     def save_scene_action(self):
         snap = {str(i): self.dmx.output_frame[i] for i in range(1, 513) if self.dmx.output_frame[i] > 0}
@@ -443,9 +722,17 @@ class MainWindow(QMainWindow):
     def load_data(self):
         d = data_manager.load_studio_data()
         if d:
-            self.data_store.update(d); self.s_list.clear(); self.ch_list.clear(); self.cue_list.clear()
-            self.s_list.addItems(self.data_store.get("scenes", {}).keys()); self.ch_list.addItems(self.data_store.get("chases", {}).keys())
-            self.cue_list.addItems(self.data_store.get("cues", {}).keys()); self.refresh_show_list_widget()
+            self.data_store.update(d)
+            if "globals" not in self.data_store: self.data_store["globals"] = {"chase_speed": 127, "chase_fade": 127}
+            if "fixtures" not in self.data_store: self.data_store["fixtures"] = {}
+            
+            self.s_list.clear(); self.ch_list.clear(); self.cue_list.clear(); self.g_list.clear(); self.f_list.clear()
+            self.s_list.addItems(self.data_store.get("scenes", {}).keys())
+            self.ch_list.addItems(self.data_store.get("chases", {}).keys())
+            self.cue_list.addItems(self.data_store.get("cues", {}).keys())
+            self.g_list.addItems(self.data_store.get("groups", {}).keys())
+            self.f_list.addItems(self.data_store.get("fixtures", {}).keys())
+            self.refresh_show_list_widget()
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
