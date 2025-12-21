@@ -1,124 +1,144 @@
-import time
 import numpy as np
-import pyaudio
+import sounddevice as sd
 from PyQt6.QtCore import QThread, pyqtSignal
+import time
 
 class AudioReactor(QThread):
-    # Segnale emesso ~40 volte al secondo:
-    # is_beat (bool): True se è stato rilevato un colpo di cassa
-    # volume (int): 0-255 livello volume generale
-    # spectrum (list): [bassi, medi, alti] valori 0-255
-    data_processed = pyqtSignal(bool, int, list)
-    
+    # Segnale: is_kick, is_snare, volume_norm, [bass, mid, high]
+    data_processed = pyqtSignal(bool, bool, int, list)
+
     def __init__(self):
         super().__init__()
-        self.running = False
         self.device_index = None
-        self.gain = 1.0
+        self.running = False
+        self.gain = 1.0 # Slider utente (moltiplicatore extra)
+        
+        # --- AUTO GAIN CONTROL (AGC) ---
+        # Serve a rendere il segnale indipendente dal volume di Windows
+        self.rolling_peak = 0.01 # Valore massimo recente
+        self.agc_decay = 0.995   # Quanto velocemente si adatta se abbassi il volume (Lento)
         
         # Parametri Audio
-        self.CHUNK = 1024
-        self.FORMAT = pyaudio.paInt16
-        self.CHANNELS = 1
-        self.RATE = 44100
+        self.samplerate = 44100
+        self.blocksize = 1024 # Buffer size
         
-        self.p = pyaudio.PyAudio()
+        # Filtri energetici per Beat Detection
+        self.bass_energy = 0
+        self.mid_energy = 0
+        self.high_energy = 0
         
-        # Variabili per Beat Detection
-        self.bass_history = []
-        self.last_beat_time = 0
-        self.beat_threshold = 1.3 # Quanto deve essere più forte della media per essere un beat
+        # Soglie dinamiche (per Kick/Snare)
+        self.kick_threshold = 0.6
+        self.snare_threshold = 0.6
 
     def get_devices(self):
-        """Ritorna lista dispositivi input (indice, nome)"""
-        devices = []
+        """Restituisce lista device (idx, name)"""
         try:
-            info = self.p.get_host_api_info_by_index(0)
-            numdevices = info.get('deviceCount')
-            for i in range(0, numdevices):
-                dev_info = self.p.get_device_info_by_host_api_device_index(0, i)
-                if dev_info.get('maxInputChannels') > 0:
-                    devices.append((i, dev_info.get('name')))
-        except: pass
-        return devices
+            devices = sd.query_devices()
+            input_devices = []
+            for i, d in enumerate(devices):
+                if d['max_input_channels'] > 0:
+                    # Filtra nomi strani se necessario
+                    input_devices.append((i, d['name']))
+            return input_devices
+        except:
+            return []
 
     def set_device(self, index):
         self.device_index = index
 
     def run(self):
-        if self.device_index is None: return
-        
         self.running = True
-        stream = None
-        
         try:
-            stream = self.p.open(format=self.FORMAT,
-                                 channels=self.CHANNELS,
-                                 rate=self.RATE,
-                                 input=True,
-                                 input_device_index=self.device_index,
-                                 frames_per_buffer=self.CHUNK)
-            
-            while self.running:
-                try:
-                    data = stream.read(self.CHUNK, exception_on_overflow=False)
-                    audio_data = np.frombuffer(data, dtype=np.int16)
-                    
-                    # 1. Volume RMS (Root Mean Square)
-                    rms = np.sqrt(np.mean(audio_data.astype(np.float32)**2))
-                    vol_norm = min(255, int((rms / 1000) * 255 * self.gain))
-                    
-                    # 2. FFT (Analisi Spettro)
-                    fft_data = np.fft.rfft(audio_data)
-                    fft_freq = np.fft.rfftfreq(self.CHUNK, 1.0/self.RATE)
-                    magnitude = np.abs(fft_data)
-                    
-                    # Bande di frequenza
-                    # Bassi: < 150Hz
-                    # Medi: 150Hz - 2500Hz
-                    # Alti: > 2500Hz
-                    bass_mask = (fft_freq < 150)
-                    mid_mask = (fft_freq >= 150) & (fft_freq < 2500)
-                    high_mask = (fft_freq >= 2500)
-                    
-                    bass_energy = np.mean(magnitude[bass_mask]) if np.any(bass_mask) else 0
-                    mid_energy = np.mean(magnitude[mid_mask]) if np.any(mid_mask) else 0
-                    high_energy = np.mean(magnitude[high_mask]) if np.any(high_mask) else 0
-                    
-                    # Normalizzazione visuale (valori empirici)
-                    b_val = min(255, int((bass_energy / 10000) * 255 * self.gain))
-                    m_val = min(255, int((mid_energy / 5000) * 255 * self.gain))
-                    h_val = min(255, int((high_energy / 2000) * 255 * self.gain))
-                    
-                    # 3. Beat Detection (Semplice)
-                    is_beat = False
-                    self.bass_history.append(bass_energy)
-                    if len(self.bass_history) > 20: # ~0.5 secondi di storia
-                        self.bass_history.pop(0)
-                        
-                    avg_energy = np.mean(self.bass_history)
-                    
-                    # Se l'energia attuale supera la media * threshold e c'è abbastanza volume
-                    if bass_energy > avg_energy * self.beat_threshold and bass_energy > 2000:
-                        # Debounce (max 1 beat ogni 0.25s)
-                        if (time.time() - self.last_beat_time) > 0.25:
-                            is_beat = True
-                            self.last_beat_time = time.time()
-                    
-                    self.data_processed.emit(is_beat, vol_norm, [b_val, m_val, h_val])
-                    
-                except Exception as e:
-                    print(f"Audio processing error: {e}")
-                    break
-                    
+            with sd.InputStream(device=self.device_index, channels=1, callback=self.audio_callback,
+                                blocksize=self.blocksize, samplerate=self.samplerate):
+                while self.running:
+                    self.msleep(10)
         except Exception as e:
-            print(f"Audio Stream Error: {e}")
-        
-        finally:
-            if stream:
-                stream.stop_stream()
-                stream.close()
+            print(f"Audio Error: {e}")
+            self.running = False
 
     def stop(self):
         self.running = False
         self.wait()
+
+    def audio_callback(self, indata, frames, time_info, status):
+        if not self.running: return
+        
+        # 1. Copia dati e rimuovi DC offset
+        audio_data = indata[:, 0].copy()
+        audio_data -= np.mean(audio_data) # Centra l'onda
+        
+        # 2. AUTO GAIN CONTROL (Il cuore della stabilità)
+        # Trova il picco attuale
+        current_peak = np.max(np.abs(audio_data))
+        
+        # Aggiorna il picco "storico" (Rolling Peak)
+        if current_peak > self.rolling_peak:
+            # Se il segnale sale, adattati subito (Attack veloce)
+            self.rolling_peak = current_peak
+        else:
+            # Se il segnale scende, adattati lentamente (Decay lento)
+            # Questo evita che il "silenzio" venga amplificato a rumore
+            self.rolling_peak *= self.agc_decay
+            
+        # Protezione divisione per zero
+        if self.rolling_peak < 0.001: self.rolling_peak = 0.001
+        
+        # NORMALIZZAZIONE: Porta il segnale a un livello standard (0.0 - 1.0)
+        # Ora l'audio è indipendente dal volume di Windows!
+        normalized_audio = audio_data / self.rolling_peak
+        
+        # Applica Gain Utente (Slider UI)
+        # Moltiplichiamo per 2.0 di base per avere un segnale bello caldo
+        normalized_audio *= (self.gain * 2.0)
+        
+        # 3. FFT (Analisi Spettro su Audio Normalizzato)
+        fft_data = np.fft.rfft(normalized_audio * np.hanning(len(normalized_audio)))
+        fft_mag = np.abs(fft_data)
+        
+        # Mapping Frequenze (Indici approssimativi per 44.1kHz / 1024 buffer)
+        # Bass: 20-150Hz -> idx 1-4
+        # Mid: 200-2000Hz -> idx 5-40
+        # High: 2kHz-10kHz -> idx 40-200
+        
+        b_idx = slice(1, 5)
+        m_idx = slice(5, 45)
+        h_idx = slice(45, 250)
+        
+        bass_raw = np.sum(fft_mag[b_idx])
+        mid_raw  = np.sum(fft_mag[m_idx])
+        high_raw = np.sum(fft_mag[h_idx])
+        
+        # 4. Smoothing Energie
+        self.bass_energy = (self.bass_energy * 0.6) + (bass_raw * 0.4)
+        self.mid_energy  = (self.mid_energy * 0.6) + (mid_raw * 0.4)
+        self.high_energy = (self.high_energy * 0.6) + (high_raw * 0.4)
+        
+        # 5. Beat Detection (Soglie Dinamiche)
+        # Se l'energia istantanea supera la media recente * threshold
+        is_kick = False
+        is_snare = False
+        
+        # Logica semplice ma efficace su segnale normalizzato
+        if self.bass_energy > 8 and bass_raw > (self.bass_energy * 1.3):
+            is_kick = True
+            
+        if self.high_energy > 5 and high_raw > (self.high_energy * 1.3):
+            is_snare = True
+            
+        # 6. Scaling finale per UI (0-255)
+        # Usiamo tanh per saturazione morbida (non taglia di netto a 255)
+        def scale(val):
+            return int(np.tanh(val / 30.0) * 255)
+
+        vol_disp = int(np.mean(np.abs(normalized_audio)) * 255 * 2) # Volume medio per barra
+        vol_disp = min(255, vol_disp)
+        
+        spec_list = [
+            scale(self.bass_energy),
+            scale(self.mid_energy),
+            scale(self.high_energy)
+        ]
+        
+        self.data_processed.emit(is_kick, is_snare, vol_disp, spec_list)
